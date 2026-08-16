@@ -86,6 +86,16 @@ During normal operation the application can create diagnostic logs, translation 
 
 Each diagnostic session is designed to keep useful context for debugging while avoiding huge repetitive logs. The logging system separates informational events from warnings/errors, groups repeated failures by stable signatures, keeps traceback/context for real failures and produces compact summaries for analysis with ChatGPT or Codex.
 
+## Verification
+
+The repository includes a Windows GitHub Actions workflow that compiles the main application source on every push and pull request:
+
+```powershell
+python -m py_compile video_translator.py
+```
+
+This CI check catches Python syntax regressions without downloading Whisper models or starting a translation job. Full Whisper, TTS, networking and FFmpeg behavior still requires runtime testing.
+
 ## Notes
 
 - Whisper can only translate speech that it successfully recognizes; speech hidden by noise/music may be missed.
@@ -95,3 +105,7 @@ Each diagnostic session is designed to keep useful context for debugging while a
 ## Documentation
 
 The original Russian documentation and changelog are included in the repository for additional implementation and recovery details.
+
+## License
+
+No open-source license is currently granted. The source code is published for portfolio and code-review purposes.

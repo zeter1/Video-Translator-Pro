@@ -1,0 +1,7 @@
+openai-whisper
+edge-tts
+gTTS
+deep-translator
+moviepy<2
+numpy
+requests

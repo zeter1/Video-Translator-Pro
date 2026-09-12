@@ -4,4 +4,3 @@ gTTS
 deep-translator
 moviepy<2
 numpy
-requests

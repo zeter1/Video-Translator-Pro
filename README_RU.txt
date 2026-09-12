@@ -1,3 +1,21 @@
+Видео Переводчик PRO — модульная структура для Codex
+=====================================================
+
+В этой версии рабочая логика сохранена, но исходный монолит video_translator.py
+разбит на пакет videotranslator/. Корневой video_translator.py остался совместимым
+файлом запуска и legacy API.
+
+Для разработки и Codex используйте короткий маршрут:
+- AGENTS.md
+- python tools/find_owner.py "описание задачи"
+- python tools/codex_context.py "описание задачи" --code --max-lines 180
+- python tools/verify_project.py
+
+docs/CODE_INDEX.md — только компактный fallback; полный symbol/call graph читает
+машинный инструмент из docs/CODE_MAP.json, поэтому Codex не нужно загружать индекс целиком.
+
+Пользовательский запуск на Windows не изменился: используйте Запустить.bat.
+
 Видео Переводчик PRO — Pause Sync Quality
 =========================================
 

@@ -1,10 +1,57 @@
 name: Apply staged upload
+
 on:
-  workflow_dispatch:
+  push:
+    branches:
+      - upload-v2026-09-12
+
 permissions:
   contents: write
+
 jobs:
-  noop:
+  apply:
     runs-on: ubuntu-latest
     steps:
-      - run: echo staged
+      - name: Checkout staging branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download verified source archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -L --fail --retry 3 --retry-delay 2 \
+            'https://drive.google.com/uc?export=download&id=1WkUsB8xxfZCoQzyym8zpKIPBc2nUNFaM' \
+            -o /tmp/video-translator-pro.zip
+          test -s /tmp/video-translator-pro.zip
+          unzip -t /tmp/video-translator-pro.zip >/dev/null
+
+      - name: Apply new version
+        shell: bash
+        run: |
+          set -euo pipefail
+          unzip -oq /tmp/video-translator-pro.zip -d .
+          rm -rf logs 'Логи проблем' translated_texts tts_cache work
+          find . -type d -name '__pycache__' -prune -exec rm -rf {} +
+          find . -type f -name '*.pyc' -delete
+
+      - name: Verify project
+        shell: bash
+        run: python tools/verify_project.py
+
+      - name: Commit staged version
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f .github/workflows/apply-upload.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git status --short
+          if git diff --cached --quiet; then
+            echo 'No changes to commit.'
+            exit 0
+          fi
+          git commit -m 'Update Video Translator Pro to 2026-09-12'
+          git push origin HEAD:upload-v2026-09-12

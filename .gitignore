@@ -1,59 +1,22 @@
-# Python
 __pycache__/
 *.py[cod]
 *.pyo
-*.pyd
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
+
+# Runtime diagnostics / recovery / caches
+logs/
+Логи проблем/
+translated_texts/
+tts_cache/
+work/
+
+# Local environments / editor state
 .venv/
 venv/
-env/
-
-# IDE / OS
-.vscode/
+.env
 .idea/
-.DS_Store
-Thumbs.db
-desktop.ini
+.vscode/
 
 # Build artifacts
 build/
 dist/
 *.spec
-*.exe
-
-# Application runtime data
-Логи проблем/
-logs/
-translated_texts/
-tts_cache/
-settings.json
-*.tmp
-*.part
-
-# Generated translation reports / outputs
-*_segments.txt
-*_RU.mp4
-*_translated.mp4
-
-# Media files should not be committed
-*.mp4
-*.mkv
-*.avi
-*.mov
-*.webm
-*.mp3
-*.wav
-*.m4a
-*.aac
-*.flac
-
-# FFmpeg local binaries
-ffmpeg.exe
-ffprobe.exe
-
-# Local archives
-*.zip
-*.7z
-*.rar

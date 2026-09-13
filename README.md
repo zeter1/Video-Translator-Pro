@@ -1,55 +1,56 @@
 # Video Translator Pro
 
-Windows desktop application for translating and dubbing videos with speech recognition, machine translation, neural text-to-speech and FFmpeg-based media processing.
+**Video Translator Pro** — настольное приложение для Windows, предназначенное для автоматического перевода и озвучивания видео. Программа объединяет распознавание речи, машинный перевод, нейросетевой синтез голоса и обработку видео через FFmpeg.
 
-The project is designed not only to generate a translated audio track, but also to preserve speech quality when the translated phrase is longer than the original timing slot.
+Проект рассчитан не только на создание переведённой аудиодорожки, но и на сохранение естественного звучания речи в тех случаях, когда переведённая фраза получается длиннее исходного временного интервала.
 
-## Highlights
+## Основные возможности
 
-- Speech recognition with **OpenAI Whisper**.
-- Translation through **deep-translator / Google Translator**.
-- Neural dubbing with **Edge TTS**, with controlled **gTTS fallback**.
-- **Pause Sync** mode: long translated phrases are not aggressively compressed or cut; the video can insert a short freeze/pause so the phrase can finish naturally.
-- Configurable voice-speed limit: **x1.15 / x1.20 / x1.25**.
-- FFmpeg/FFprobe pipeline for audio extraction, processing, muxing and final validation.
-- Optional original-audio background mix.
-- Multi-language target support.
-- Persistent TTS cache for recovery after failures or cancellation.
-- Translation checkpoints and batch recovery after interrupted processing.
-- Verification of completed MP4 files before they are treated as successful.
-- Structured diagnostic sessions intended for troubleshooting with **ChatGPT / Codex**.
+- Распознавание речи с помощью **OpenAI Whisper**.
+- Перевод текста через **deep-translator / Google Translator**.
+- Нейросетевая озвучка через **Edge TTS** с контролируемым резервным переходом на **gTTS**.
+- Режим **Pause Sync**: длинные переведённые фразы не обрезаются и не ускоряются до неестественной скорости — при необходимости программа добавляет короткую паузу или стоп-кадр, чтобы озвучка успела завершиться полностью.
+- Настраиваемый предел ускорения голоса: **x1.15 / x1.20 / x1.25**.
+- Полный медиаконвейер на **FFmpeg / FFprobe** для извлечения аудио, обработки, сборки итогового видео и проверки результата.
+- Возможность подмешивания оригинальной аудиодорожки на фоне.
+- Поддержка перевода на несколько языков.
+- Постоянный TTS-кэш для восстановления после ошибок или отмены операции.
+- Контрольные точки перевода и восстановление незавершённых задач после прерывания работы.
+- Проверка готового MP4 перед тем, как задача считается успешно завершённой.
+- Структурированные диагностические сессии для удобного анализа проблем через **ChatGPT / Codex**.
 
-## Reliability and recovery
+## Надёжность и восстановление
 
-The application contains several mechanisms for long-running jobs:
+Для длительных задач в приложении предусмотрены дополнительные механизмы устойчивости:
 
-- atomic translation checkpoints;
-- recovery of unfinished batches after an abnormal shutdown;
-- reuse of successfully generated TTS segments;
-- bounded retries and network-storm backoff;
-- separate protection for translation, Edge TTS and gTTS network failures;
-- periodic heartbeat events during long Whisper and FFmpeg stages;
-- validation that the final MP4 contains both video and audio streams;
-- cleanup and size limits for recovery/TTS cache data.
+- атомарные контрольные точки перевода;
+- восстановление незавершённых пакетов после аварийного завершения программы;
+- повторное использование уже успешно созданных TTS-фрагментов;
+- ограниченные повторные попытки при сетевых ошибках;
+- защита от массовых сетевых сбоев;
+- отдельная обработка ошибок перевода, Edge TTS и gTTS;
+- периодические heartbeat-события во время длительных этапов Whisper и FFmpeg;
+- проверка наличия видео- и аудиопотока в итоговом MP4;
+- автоматическая очистка и ограничение размера данных восстановления и TTS-кэша.
 
 ## Pause Sync
 
-Translated speech can be substantially longer than the original speech. Instead of forcing every phrase into the original slot with extreme speed-up, Video Translator Pro uses the following strategy:
+Переведённая речь часто получается заметно длиннее оригинальной. Вместо сильного ускорения или обрезки фразы Video Translator Pro использует более щадящий алгоритм синхронизации:
 
-1. Use available natural silence after the original phrase.
-2. Apply moderate TTS/tempo acceleration within the configured limit.
-3. If the phrase still does not fit, insert a video freeze/pause until the translated phrase finishes.
+1. Использует доступную естественную паузу после исходной фразы.
+2. При необходимости умеренно ускоряет озвучку в пределах выбранного ограничения.
+3. Если фраза всё равно не помещается во временной интервал, программа временно останавливает видеоряд, пока перевод не будет произнесён полностью.
 
-This can make the final video slightly longer than the source, but preserves the full translated phrase and reduces robotic-sounding speech.
+Из-за этого итоговое видео иногда может быть немного длиннее оригинала, зато перевод сохраняется полностью, а речь звучит естественнее и менее роботизированно.
 
-## Requirements
+## Системные требования
 
-- Windows 10/11.
+- **Windows 10 / 11**.
 - Python **3.10–3.13**.
-- FFmpeg and FFprobe available in `PATH`, or `ffmpeg.exe` and `ffprobe.exe` placed next to `video_translator.py`.
-- Python dependencies from `requirements.txt`.
+- **FFmpeg** и **FFprobe** должны быть доступны через `PATH` либо находиться рядом с `video_translator.py` в виде `ffmpeg.exe` и `ffprobe.exe`.
+- Python-зависимости из `requirements.txt`.
 
-## Installation
+## Установка
 
 ```powershell
 py -m venv .venv
@@ -58,17 +59,17 @@ py -m pip install --upgrade pip
 py -m pip install -r requirements.txt
 ```
 
-Then install FFmpeg or place `ffmpeg.exe` and `ffprobe.exe` next to the program.
+После этого установите FFmpeg либо поместите `ffmpeg.exe` и `ffprobe.exe` рядом с программой.
 
-## Run
+## Запуск
 
 ```powershell
 py video_translator.py
 ```
 
-On Windows you can also use `Запустить.bat` after installing the dependencies.
+В Windows также можно использовать файл `Запустить.bat` после установки необходимых зависимостей.
 
-## Main Python dependencies
+## Основные Python-зависимости
 
 - `openai-whisper`
 - `edge-tts`
@@ -78,34 +79,46 @@ On Windows you can also use `Запустить.bat` after installing the depend
 - `numpy`
 - `requests`
 
-## Runtime data
+## Рабочие данные
 
-During normal operation the application can create diagnostic logs, translation checkpoints, TTS cache data, temporary media and user settings. These runtime artifacts are excluded from Git through `.gitignore` and should not be committed to the repository.
+Во время работы приложение может создавать диагностические журналы, контрольные точки перевода, TTS-кэш, временные медиафайлы и пользовательские настройки. Эти данные исключены из Git через `.gitignore` и не должны попадать в репозиторий.
 
-## Diagnostics
+## Диагностика и логи
 
-Each diagnostic session is designed to keep useful context for debugging while avoiding huge repetitive logs. The logging system separates informational events from warnings/errors, groups repeated failures by stable signatures, keeps traceback/context for real failures and produces compact summaries for analysis with ChatGPT or Codex.
+Система логирования построена так, чтобы сохранять максимум полезной информации для поиска ошибок, не создавая огромные повторяющиеся журналы.
 
-## Verification
+Диагностика:
 
-The repository includes a Windows GitHub Actions workflow that compiles the main application source on every push and pull request:
+- разделяет обычные события, предупреждения и ошибки;
+- группирует повторяющиеся сбои по стабильным сигнатурам;
+- сохраняет traceback и контекст настоящих ошибок;
+- формирует компактные сводки для последующего анализа через ChatGPT или Codex.
+
+Это значительно упрощает поиск причин проблем при переводе, синтезе речи, работе Whisper, FFmpeg и сетевых сервисов.
+
+## Проверка кода
+
+В репозитории настроен GitHub Actions workflow для Windows, который при каждом push и pull request проверяет основной Python-файл на синтаксические ошибки:
 
 ```powershell
 python -m py_compile video_translator.py
 ```
 
-This CI check catches Python syntax regressions without downloading Whisper models or starting a translation job. Full Whisper, TTS, networking and FFmpeg behavior still requires runtime testing.
+Такая проверка позволяет обнаруживать синтаксические регрессии без необходимости скачивать модели Whisper или запускать полный процесс перевода видео.
 
-## Notes
+Полноценная проверка Whisper, TTS, сетевых сервисов и FFmpeg по-прежнему требует запуска приложения в рабочей среде.
 
-- Whisper can only translate speech that it successfully recognizes; speech hidden by noise/music may be missed.
-- Edge TTS is the preferred speech provider. gTTS is used only as a controlled fallback when Edge TTS remains unavailable.
-- The final video may be longer than the original when Pause Sync inserts pauses to preserve complete translated speech.
+## Важные особенности
 
-## Documentation
+- Whisper может перевести только ту речь, которую ему удалось корректно распознать. Слова, сильно заглушённые музыкой или шумом, могут быть пропущены.
+- **Edge TTS** используется как основной движок синтеза речи.
+- **gTTS** применяется только как резервный вариант, если Edge TTS длительное время недоступен.
+- Итоговое видео может оказаться немного длиннее исходного, если Pause Sync добавляет паузы для сохранения полной переведённой речи.
 
-The original Russian documentation and changelog are included in the repository for additional implementation and recovery details.
+## Документация
 
-## License
+В репозитории также находится дополнительная русскоязычная документация, информация об архитектуре, восстановлении после ошибок и истории изменений проекта.
 
-No open-source license is currently granted. The source code is published for portfolio and code-review purposes.
+## Лицензия
+
+Проект опубликован преимущественно для портфолио, изучения архитектуры и просмотра исходного кода. Отдельная open-source лицензия в настоящее время не предоставляется.

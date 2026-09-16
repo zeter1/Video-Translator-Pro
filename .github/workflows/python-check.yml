@@ -17,9 +17,6 @@ concurrency:
 jobs:
   verify:
     runs-on: windows-latest
-    env:
-      TEMP: ${{ runner.temp }}
-      TMP: ${{ runner.temp }}
 
     steps:
       - name: Checkout repository
@@ -36,4 +33,7 @@ jobs:
 
       - name: Run offline regression tests
         shell: pwsh
-        run: python -m unittest discover -s tests -v
+        run: |
+          $env:TEMP = $env:RUNNER_TEMP
+          $env:TMP = $env:RUNNER_TEMP
+          python -m unittest discover -s tests -v

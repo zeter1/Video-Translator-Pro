@@ -2,14 +2,20 @@ name: Python checks
 
 on:
   push:
+    branches: [main]
   pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: video-translator-checks-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  syntax:
+  verify:
     runs-on: windows-latest
 
     steps:
@@ -24,3 +30,7 @@ jobs:
       - name: Compile application, package, tests and tools
         shell: pwsh
         run: python -m compileall -q video_translator.py videotranslator tests tools
+
+      - name: Run offline regression tests
+        shell: pwsh
+        run: python -m unittest discover -s tests -v

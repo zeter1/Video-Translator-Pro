@@ -1,0 +1,86 @@
+name: Сообщить об ошибке
+description: Сообщение о проблеме Video Translator Pro
+title: "[Bug] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Спасибо за сообщение. Для проблем перевода особенно важны этап сбоя, настройки Whisper/TTS, сведения о FFmpeg и диагностическая сессия.
+        Не прикладывайте исходное видео или логи с личным содержимым, если не хотите публиковать эти данные.
+
+  - type: input
+    id: app_version
+    attributes:
+      label: Версия/ревизия программы
+    validations:
+      required: true
+
+  - type: input
+    id: windows_version
+    attributes:
+      label: Windows
+      placeholder: "например: Windows 11 24H2"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: failed_stage
+    attributes:
+      label: На каком этапе возникла проблема
+      options:
+        - Запуск / выбор файла
+        - Извлечение аудио
+        - Whisper / распознавание
+        - Перевод текста
+        - Edge TTS
+        - gTTS fallback
+        - Pause Sync / тайминг
+        - FFmpeg / сборка видео
+        - Финальная проверка MP4
+        - Восстановление задачи
+        - Не уверен
+    validations:
+      required: true
+
+  - type: textarea
+    id: settings
+    attributes:
+      label: Настройки задачи
+      description: Языки, модель Whisper, TTS, лимит ускорения, подмешивание оригинала и другие важные параметры.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Что произошло
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Как воспроизвести
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Ожидаемое поведение
+    validations:
+      required: true
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Диагностические данные
+      description: Приложите итоговую сводку или небольшой релевантный фрагмент диагностической сессии. Удалите личные пути и содержимое при необходимости.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Проверки
+      options:
+        - label: Я проверил проблему на текущей версии проекта.
+          required: true
+        - label: Я сохранил данные recovery/cache до завершения диагностики, если проблема связана с незавершённой задачей.
+          required: false

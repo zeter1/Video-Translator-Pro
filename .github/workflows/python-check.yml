@@ -5,6 +5,9 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   syntax:
     runs-on: windows-latest
@@ -18,6 +21,6 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Compile Python source
+      - name: Compile application, package, tests and tools
         shell: pwsh
-        run: python -m py_compile video_translator.py
+        run: python -m compileall -q video_translator.py videotranslator tests tools

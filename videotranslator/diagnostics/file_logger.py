@@ -8,6 +8,7 @@ from pathlib import Path
 import threading
 import time
 import traceback
+from uuid import uuid4
 
 from videotranslator.config import NORMAL_LOG_MAX_FILES, NORMAL_LOG_RETENTION_DAYS
 from videotranslator.core.diagnostics import redact_diagnostic_text, safe_log_filename
@@ -52,7 +53,7 @@ class FileLogger:
         # Microseconds + PID avoid accidental append into another session that starts
         # within the same second (including a second application instance).
         stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S_%f")
-        self.path = logs_dir / f"{safe_log_filename(prefix)}_{stamp}_{os.getpid()}.txt"
+        self.path = logs_dir / f"{safe_log_filename(prefix)}_{stamp}_{os.getpid()}_{uuid4().hex}.txt"
         self.file = open(self.path, "x", encoding="utf-8", buffering=1)
         self.write("=" * 72)
         self.write("ЛОГ ПРОГРАММЫ: Видео Переводчик PRO")

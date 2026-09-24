@@ -10,6 +10,9 @@ import shutil
 import threading
 
 
+_atomic_write_lock = threading.RLock()
+
+
 def atomic_write_text(path: Path, text: str):
     """Атомарно записывает UTF-8 текст, не оставляя частично записанный отчёт."""
     path = Path(path)
@@ -43,18 +46,19 @@ def atomic_write_json(path: Path, data: dict):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
-    try:
-        with open(temp_path, "w", encoding="utf-8", newline="\n") as file:
-            json.dump(data, file, ensure_ascii=False, indent=2)
-            file.flush()
-            os.fsync(file.fileno())
-        os.replace(temp_path, path)
-    finally:
+    with _atomic_write_lock:
         try:
-            if temp_path.exists():
-                temp_path.unlink()
-        except OSError:
-            pass
+            with open(temp_path, "w", encoding="utf-8", newline="\n") as file:
+                json.dump(data, file, ensure_ascii=False, indent=2)
+                file.flush()
+                os.fsync(file.fileno())
+            os.replace(temp_path, path)
+        finally:
+            try:
+                if temp_path.exists():
+                    temp_path.unlink()
+            except OSError:
+                pass
 
 
 def backup_corrupt_file(path: Path, label: str = "corrupt") -> Path | None:

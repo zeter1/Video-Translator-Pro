@@ -500,6 +500,7 @@ class TranslationCheckpointTests(unittest.TestCase):
             problem_cb=lambda event, **details: events.append((event, details)),
         )
         translator.target_info = {"code": "ru"}
+        translator.hybrid_translation_settings = {"local_first": False}
 
         with mock.patch.dict(sys.modules, {"deep_translator": fake_module}):
             with mock.patch.object(translator, "_sleep_or_cancel", return_value=None):
@@ -536,6 +537,7 @@ class TranslationCheckpointTests(unittest.TestCase):
                 problem_cb=lambda event, **details: events.append((event, details)),
             )
             translator.tts_cache = vt.TTSCache(directory / "tts_cache")
+            translator.hybrid_translation_settings = {"local_first": False}
 
             def fake_translate(_text, index=0, attempts=3):
                 if index == 3:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import os
 import sys
 
 
@@ -14,6 +15,26 @@ def get_program_dir() -> Path:
         return Path(__file__).resolve().parents[2]
     except Exception:
         return Path.cwd()
+
+
+def get_runtime_bin_dir() -> Path:
+    """Directory containing binaries bundled by PyInstaller at runtime."""
+    try:
+        bundle_dir = getattr(sys, "_MEIPASS", None)
+        if getattr(sys, "frozen", False) and bundle_dir:
+            return Path(bundle_dir).resolve()
+    except Exception:
+        pass
+    return get_program_dir()
+
+
+def configure_runtime_path() -> None:
+    """Make bundled FFmpeg/ffprobe discoverable by existing subprocess code."""
+    if not getattr(sys, "frozen", False):
+        return
+    current = os.environ.get("PATH", "")
+    prefixes = [str(get_runtime_bin_dir()), str(get_program_dir())]
+    os.environ["PATH"] = os.pathsep.join([*prefixes, current])
 
 
 def get_logs_dir() -> Path:

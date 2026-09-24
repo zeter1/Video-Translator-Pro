@@ -1,4 +1,5 @@
 import tempfile
+import os
 import threading
 import unittest
 from pathlib import Path
@@ -124,7 +125,7 @@ class QueueModeStartTests(unittest.TestCase):
             queued = harness.enqueued[0]
             self.assertNotEqual("active-must-not-be-reused", queued["batch_id"])
             self.assertEqual("queued", queued["status"])
-            self.assertEqual(str(source.resolve()), queued["files"][0]["input"]["path"])
+            self.assertTrue(os.path.samefile(source, queued["files"][0]["input"]["path"]))
             thread_class.assert_not_called()
 
     def test_start_uses_visible_selected_output_directory_without_prompt(self):
@@ -182,8 +183,8 @@ class QueueModeStartTests(unittest.TestCase):
 
             ask_directory.assert_not_called()
             self.assertEqual(1, len(harness.enqueued))
-            self.assertEqual(str(out.resolve()), harness.enqueued[0]["output_dir"])
-            self.assertEqual(str(out.resolve()), harness.var_output_dir.get())
+            self.assertTrue(os.path.samefile(out, harness.enqueued[0]["output_dir"]))
+            self.assertTrue(os.path.samefile(out, harness.var_output_dir.get()))
             self.assertEqual(1, harness.saved_settings)
 
 

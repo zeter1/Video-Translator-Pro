@@ -501,10 +501,10 @@ class TranslationCheckpointTests(unittest.TestCase):
         )
         translator.target_info = {"code": "ru"}
         translator.hybrid_translation_settings = {"local_first": False}
+        translator.translation_client = flaky
 
-        with mock.patch.dict(sys.modules, {"deep_translator": fake_module}):
-            with mock.patch.object(translator, "_sleep_or_cancel", return_value=None):
-                result = translator.translate_segment("Hello", index=7, attempts=2)
+        with mock.patch.object(translator, "_sleep_or_cancel", return_value=None):
+            result = translator.translate_segment("Hello", index=7, attempts=2)
 
         self.assertEqual(result, "Перевод готов")
         self.assertEqual(flaky.calls, 2)
@@ -567,6 +567,7 @@ class TranslationCheckpointTests(unittest.TestCase):
                     0,
                     target_info=vt.get_target_language("Русский"),
                     review_before_tts=False,
+                    audio_settings={"hybrid_local_first": False, "auto_install_argos_pairs": False},
                 )
 
             self.assertFalse(result)

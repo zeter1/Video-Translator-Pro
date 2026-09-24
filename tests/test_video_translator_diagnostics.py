@@ -517,7 +517,7 @@ class BatchRecoveryTests(unittest.TestCase):
             pending = vt.batch_recovery_pending_entries(loaded)
 
             self.assertEqual(len(pending), 1)
-            self.assertEqual(pending[0]["input"]["path"], str(second.resolve()))
+            self.assertTrue(os.path.samefile(pending[0]["input"]["path"], second))
             self.assertFalse(list(directory.glob("*.tmp")))
 
     def test_old_problem_log_recovery_ignores_empty_or_directory_path(self):

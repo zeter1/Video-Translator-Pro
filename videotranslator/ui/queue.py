@@ -24,7 +24,7 @@ class UIQueueMixin:
                 self.video_files.append(path)
                 existing.add(normalized)
                 self.listbox.insert(tk.END, os.path.basename(path))
-        if paths:
+        if paths and not getattr(self, "_processing", False):
             self._resume_batch_state = None
         self._update_count()
 
@@ -34,7 +34,7 @@ class UIQueueMixin:
         for index in reversed(selected):
             self.listbox.delete(index)
             del self.video_files[index]
-        if selected:
+        if selected and not getattr(self, "_processing", False):
             self._resume_batch_state = None
         self._update_count()
 
@@ -42,7 +42,8 @@ class UIQueueMixin:
     def clear_all(self):
         self.listbox.delete(0, tk.END)
         self.video_files.clear()
-        self._resume_batch_state = None
+        if not getattr(self, "_processing", False):
+            self._resume_batch_state = None
         self._update_count()
 
 

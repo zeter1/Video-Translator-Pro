@@ -132,6 +132,23 @@ class ProblemSummaryMixin:
             self._summary["session_status"] = "closed"
             self._summary["current_stage"] = "closed"
             self._summary["current_file"]["stage"] = "closed"
+            # A closed application session cannot have a literally active network incident.
+            # Preserve the diagnostic truth by marking unresolved storms explicitly instead
+            # of leaving ``active=true`` forever, which misleads ChatGPT/Codex on next read.
+            network = self._summary.get("network") or {}
+            unresolved = 0
+            for service, state in (network.get("active_services") or {}).items():
+                if isinstance(state, dict) and state.get("active"):
+                    unresolved += 1
+                    state.update({
+                        "active": False,
+                        "unresolved_at_close": True,
+                        "closed_at": timestamp,
+                    })
+            if unresolved:
+                network["incidents_unresolved_at_close"] = int(
+                    network.get("incidents_unresolved_at_close") or 0
+                ) + unresolved
         elif event == "app_close_requested" and details.get("processing"):
             self._summary["batch"]["status"] = "cancellation_requested"
         if event == "video_encoder_selected":
@@ -173,6 +190,17 @@ class ProblemSummaryMixin:
                 "voice_may_differ": bool(details.get("gtts_fallback", 0)),
                 "gtts_segments": details.get("gtts_fallback", 0),
             })
+        if event == "pause_sync_quality_summary":
+            self._summary["pause_sync"] = {
+                "pause_count": int(details.get("pause_count") or 0),
+                "total_pause_sec": details.get("total_pause_sec"),
+                "source_video_duration_sec": details.get("source_video_duration_sec"),
+                "pause_ratio": details.get("pause_ratio"),
+                "severe_pause_count": int(details.get("severe_pause_count") or 0),
+                "max_pause_sec": details.get("max_pause_sec"),
+                "top_pause_segments": details.get("top_pause_segments") or [],
+            }
+
         if event in {
             "tts_cache_maintenance_finished",
             "tts_cache_released_after_success",

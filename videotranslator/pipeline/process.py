@@ -10,10 +10,11 @@ import shutil
 import tempfile
 import time
 import traceback
-from videotranslator.config import DEFAULT_TARGET_LANGUAGE, EDGE_TTS_MAX_TIMEOUT_SEC, EDGE_TTS_MIN_TIMEOUT_SEC, EDGE_VOICE_PRESERVE_SEC, EDGE_VOICE_PROBE_INTERVAL_SEC, NETWORK_CONNECT_TIMEOUT_SEC, NETWORK_READ_TIMEOUT_SEC, TOTAL_MAX_SPEECH_SPEED, TRANSLATION_BATCH_MAX_CHARS, TRANSLATION_BATCH_MAX_SEGMENTS, TRANSLATION_CHECKPOINT_EVERY, TRANSLATION_PROGRESS_EVERY, TTS_CACHE_MAX_BYTES, TTS_CACHE_ORPHAN_RETENTION_HOURS, TTS_CACHE_PREPARED_RETENTION_HOURS, TTS_CACHE_RECOVERY_RETENTION_DAYS, TTS_CACHE_SCHEMA_VERSION, TTS_CACHE_TARGET_BYTES, TTS_PREPARED_CACHE_SCHEMA_VERSION, get_target_language, normalize_audio_settings
+from videotranslator.config import DEFAULT_TARGET_LANGUAGE, EDGE_TTS_MAX_TIMEOUT_SEC, EDGE_TTS_MIN_TIMEOUT_SEC, EDGE_VOICE_PRESERVE_SEC, EDGE_VOICE_PROBE_INTERVAL_SEC, NETWORK_CONNECT_TIMEOUT_SEC, NETWORK_READ_TIMEOUT_SEC, TOTAL_MAX_SPEECH_SPEED, TRANSLATION_BATCH_MAX_CHARS, TRANSLATION_BATCH_MAX_SEGMENTS, TRANSLATION_CHECKPOINT_EVERY, TRANSLATION_PROGRESS_EVERY, TRANSLATION_PROVIDER_FAILURE_STREAK_LIMIT, TRANSLATION_PROVIDER_RETRY_COOLDOWN_SEC, TRANSLATION_RATE_LIMIT_COOLDOWN_SEC, TTS_CACHE_MAX_BYTES, TTS_CACHE_ORPHAN_RETENTION_HOURS, TTS_CACHE_PREPARED_RETENTION_HOURS, TTS_CACHE_RECOVERY_RETENTION_DAYS, TTS_CACHE_SCHEMA_VERSION, TTS_CACHE_TARGET_BYTES, TTS_PREPARED_CACHE_SCHEMA_VERSION, get_target_language, normalize_audio_settings
 from videotranslator.core.cancel import CancelledError
 from videotranslator.core.diagnostics import classify_exception, compact_exception, exception_chain, redact_diagnostic_text
 from videotranslator.core.timefmt import fmt_time
+from videotranslator.core.paths import get_translation_glossary_path
 from videotranslator.diagnostics.heartbeat import ActivityHeartbeat
 from videotranslator.media.audio import calc_audio_work_timeout
 from videotranslator.media.probe import select_audio_stream
@@ -21,10 +22,12 @@ from videotranslator.media.final_video import FinalVideoSaveError
 from videotranslator.media.process import find_ffmpeg as _legacy_find_ffmpeg, find_ffprobe as _legacy_find_ffprobe
 from videotranslator.media.video import assemble_final_video as _legacy_assemble_final_video, extract_audio_for_whisper as _legacy_extract_audio_for_whisper, get_media_duration as _legacy_get_media_duration
 from videotranslator.recovery.translation import load_translation_checkpoint, translation_checkpoint_path as _legacy_translation_checkpoint_path, translation_segment_key
-from videotranslator.reports.output import write_translated_text_file as _legacy_write_translated_text_file, write_translation_report as _legacy_write_translation_report
-from videotranslator.speech.whisper import get_whisper_model as _legacy_get_whisper_model, is_cuda_available
+from videotranslator.reports.output import write_subtitle_files as _legacy_write_subtitle_files, write_translated_text_file as _legacy_write_translated_text_file, write_translation_report as _legacy_write_translation_report
+from videotranslator.speech.whisper import get_whisper_model as _legacy_get_whisper_model, is_cuda_available, summarize_transcription_quality, transcribe_video
 from videotranslator.sync.pause import merge_short_segments
 from videotranslator.translation.batching import split_translation_batches
+from videotranslator.translation.glossary import Glossary
+from videotranslator.translation.quality import inspect_translation_response
 
 
 def find_ffmpeg(*args, **kwargs):
@@ -54,6 +57,9 @@ def assemble_final_video(*args, **kwargs):
 def write_translation_report(*args, **kwargs):
     return call_legacy_override('write_translation_report', _legacy_write_translation_report, *args, **kwargs)
 
+def write_subtitle_files(*args, **kwargs):
+    return call_legacy_override('write_subtitle_files', _legacy_write_subtitle_files, *args, **kwargs)
+
 class ProcessMixin:
     """Focused behavior-preserving mixin extracted for AI-local navigation."""
 
@@ -73,8 +79,28 @@ class ProcessMixin:
         try:
             self.target_info = dict(target_info or get_target_language(DEFAULT_TARGET_LANGUAGE))
             self.audio_settings = normalize_audio_settings(audio_settings)
+            self.hybrid_translation_settings = {
+                "local_first": bool(self.audio_settings.get("hybrid_local_first", True)),
+                "auto_install_argos_pairs": bool(self.audio_settings.get("auto_install_argos_pairs", True)),
+                "local_piper_fallback": bool(self.audio_settings.get("local_piper_fallback", True)),
+                "preferred_piper_voice": str(self.audio_settings.get("preferred_piper_voice") or "piper-dmitri-ru"),
+            }
             self.speech_speed_limit = float(self.audio_settings.get("speech_speed_limit", TOTAL_MAX_SPEECH_SPEED))
             self.selected_voice = str(voice or "")
+            self.source_language = ""
+            glossary = Glossary(get_translation_glossary_path())
+            glossary_prompt = glossary.build_whisper_prompt()
+            if glossary.items:
+                self.log(
+                    f"   📚 Терминологический словарь: {len(glossary.items)} записей; "
+                    + ("подсказка для Whisper включена" if glossary_prompt else "подсказка для Whisper пуста")
+                )
+                self._problem(
+                    "translation_glossary_loaded",
+                    message="Терминологический словарь подключён к распознаванию/переводу.",
+                    entries=len(glossary.items),
+                    whisper_prompt_chars=len(glossary_prompt),
+                )
             with self.edge_voice_lock:
                 self.edge_voice_preservation_active = False
                 self.edge_voice_deadline = 0.0
@@ -114,9 +140,11 @@ class ProcessMixin:
                         "parallel_edge_requests": 2,
                         "parallel_gtts_requests": 2,
                         "selected_voice_first": True,
-                        "edge_voice_preserve_sec": EDGE_VOICE_PRESERVE_SEC,
-                        "edge_storm_bypass_to_gtts": False,
-                        "gtts_only_after_wait_or_user_confirmation": True,
+                        "edge_voice_preserve_sec": 0,
+                        "edge_storm_bypass_to_gtts": True,
+                        "gtts_only_after_wait_or_user_confirmation": False,
+                        "automatic_provider_failover": True,
+                        "user_action_required": False,
                         "edge_probe_interval_sec": EDGE_VOICE_PROBE_INTERVAL_SEC,
                         "edge_recovery_stable_sec": 30,
                         "sequential_recovery_pass": True,
@@ -179,9 +207,8 @@ class ProcessMixin:
                 f"speed≤x{self.speech_speed_limit:.2f}"
             )
             self.log(
-                "   🛡️ VPN-режим TTS: сначала сохраняется выбранный Edge-голос; "
-                f"при сбое уведомление и ожидание до {EDGE_VOICE_PRESERVE_SEC}с, "
-                "затем gTTS только как последний резерв"
+                "   🔀 Авто-fallback TTS: Edge → установленный Piper → gTTS; "
+                "смена VPN и подтверждения пользователя не требуются"
             )
 
             self.ffmpeg = find_ffmpeg()
@@ -265,24 +292,92 @@ class ProcessMixin:
                 event_cb=self._problem,
                 stage_number=2,
             ):
-                result = model.transcribe(
+                result, whisper_features = transcribe_video(
+                    model,
                     tmp_wav,
-                    fp16=use_cuda,
-                    verbose=False,
-                    language=None,
-                    task="transcribe",
-                    condition_on_previous_text=True,
+                    use_cuda=use_cuda,
+                    initial_prompt=glossary_prompt,
                 )
             self._check_cancel()
 
             segs_raw = result.get("segments", []) or []
+            asr_quality = summarize_transcription_quality(segs_raw)
+            if whisper_features.get("compat_disabled"):
+                self.log(
+                    "   ⚠️ Установленная версия Whisper не поддерживает часть улучшенной синхронизации: "
+                    + ", ".join(whisper_features["compat_disabled"])
+                    + ". Распознавание продолжено в совместимом режиме."
+                )
+            if asr_quality.get("longest_repeat_run", 0) >= 3 or asr_quality.get("suspicious_ratio", 0.0) >= 0.25:
+                self.log(
+                    "   ⚠️ Whisper обнаружил признаки сложного участка: "
+                    f"подозрительных сегментов {asr_quality.get('suspicious_ratio', 0.0):.0%}, "
+                    f"повтор подряд до {asr_quality.get('longest_repeat_run', 0)}."
+                )
+            self._problem(
+                "whisper_quality_summary",
+                message="Сводка качества и таймингов Whisper.",
+                word_timestamps=bool(whisper_features.get("word_timestamps")),
+                hallucination_silence_threshold_sec=whisper_features.get("hallucination_silence_threshold_sec"),
+                initial_prompt_used=bool(whisper_features.get("initial_prompt_used")),
+                initial_prompt_chars=int(whisper_features.get("initial_prompt_chars") or 0),
+                carry_initial_prompt=bool(whisper_features.get("carry_initial_prompt")),
+                glossary_entries=len(glossary.items),
+                compat_disabled=list(whisper_features.get("compat_disabled") or ()),
+                **asr_quality,
+            )
             full_text = (result.get("text") or "").strip()
             lang = result.get("language", "?")
+            self.source_language = str(lang or "").lower().split("-")[0]
 
             if not full_text or not segs_raw:
                 raise RuntimeError("Whisper не смог распознать речь.")
 
             self.log(f"   🌐 Язык: {lang} | Сегментов: {len(segs_raw)}")
+            target_code = str(self.target_info.get("code") or "ru").lower().split("-")[0]
+            if self.hybrid_translation_settings.get("local_first") and self.source_language and self.source_language != target_code:
+                try:
+                    manager = self._get_local_translation_manager()
+                    has_route = manager.has_local_route(self.source_language, target_code)
+                    if not has_route and self.hybrid_translation_settings.get("auto_install_argos_pairs"):
+                        self.log(
+                            f"   📦 Локальный пакет {self.source_language}→{target_code} не найден; "
+                            "пытаюсь установить Argos автоматически…"
+                        )
+                        has_route = manager.ensure_pair(
+                            self.source_language,
+                            target_code,
+                            progress_cb=lambda message: self.log(f"      {message}"),
+                        )
+                    if has_route:
+                        self.log(
+                            "   🧠 Hybrid AI: основной перевод локальный; Google будет вызван только "
+                            "для подозрительных фрагментов."
+                        )
+                        self._problem(
+                            "local_translation_route_ready",
+                            message="Локальный маршрут перевода готов.",
+                            source_language=self.source_language,
+                            target_language=target_code,
+                            backends=manager.available_backends(self.source_language, target_code),
+                        )
+                    else:
+                        self.log("   ⚠️ Локального маршрута нет; для этого видео используется Google Translate.")
+                except Exception as exc:
+                    self.log(f"   ⚠️ Подготовка локального перевода не удалась: {compact_exception(exc)}")
+                    self._problem(
+                        "local_translation_setup_failed",
+                        level="warning",
+                        message="Локальный перевод недоступен; сохранён online fallback.",
+                        source_language=self.source_language,
+                        target_language=target_code,
+                        exception={
+                            "type": type(exc).__name__,
+                            "category": classify_exception(exc),
+                            "message": compact_exception(exc, max_len=1000),
+                            "chain": exception_chain(exc),
+                        },
+                    )
             segs = merge_short_segments(segs_raw, min_dur=1.5)
             self.log(f"   🔀 После слияния: {len(segs)} сегментов")
             self._problem(
@@ -333,6 +428,7 @@ class ProcessMixin:
             failed_records = []
             pending_records = []
             cache_hits = 0
+            rejected_checkpoint_entries = 0
             new_translations = 0
             total_segments = len(segs)
             for idx, seg in enumerate(segs, 1):
@@ -349,8 +445,32 @@ class ProcessMixin:
                 key = translation_segment_key(record["start"], record["end"], source_text)
                 cached_text = checkpoint_cache.get(key, "")
                 if cached_text:
-                    record["translated"] = cached_text
-                    cache_hits += 1
+                    cached_inspection = inspect_translation_response(cached_text, source_text=source_text)
+                    if cached_inspection.get("valid"):
+                        record["translated"] = cached_text
+                        cache_hits += 1
+                    else:
+                        rejected_checkpoint_entries += 1
+                        pending_records.append((idx, record))
+                        self._problem(
+                            "translation_checkpoint_entry_rejected",
+                            level="warning",
+                            message=(
+                                "Контрольная точка содержит ответ сервиса вместо перевода; "
+                                "сегмент будет переведён заново."
+                            ),
+                            failure_kind="invalid_cached_translation",
+                            impact="cache_entry_ignored_before_tts",
+                            recovery_action="retranslate_segment",
+                            segment_index=idx,
+                            checkpoint_path=str(checkpoint_path),
+                            source_length=len(source_text),
+                            source_sha256=hashlib.sha256(
+                                source_text.encode("utf-8", errors="replace")
+                            ).hexdigest(),
+                            source_preview=" ".join(source_text.split())[:320],
+                            response_validation=cached_inspection,
+                        )
                 else:
                     pending_records.append((idx, record))
                 translated.append(record)
@@ -361,13 +481,15 @@ class ProcessMixin:
             batches = split_translation_batches(pending_records)
             self.log(
                 f"   📦 Новых запросов: {len(pending_records)} сегм. в {len(batches)} пачках "
-                f"по ≤{TRANSLATION_BATCH_MAX_SEGMENTS}; кэш: {cache_hits}"
+                f"по ≤{TRANSLATION_BATCH_MAX_SEGMENTS}; кэш: {cache_hits}; "
+                f"отброшено плохих записей кэша: {rejected_checkpoint_entries}"
             )
             self._problem(
                 "translation_batch_plan",
                 message="Сформирован безопасный план пакетного перевода.",
                 pending_segments=len(pending_records),
                 checkpoint_hits=cache_hits,
+                rejected_checkpoint_entries=rejected_checkpoint_entries,
                 batches=len(batches),
                 max_segments_per_batch=TRANSLATION_BATCH_MAX_SEGMENTS,
                 max_request_chars=TRANSLATION_BATCH_MAX_CHARS,
@@ -376,6 +498,8 @@ class ProcessMixin:
 # CODEX-PHASE VT3B BATCH_TRANSLATE — execute bounded translation batches and periodic checkpoints
             processed = cache_hits
             saved_translation_count = 0
+            provider_failure_streak = 0
+            provider_circuit_opened = False
             for batch_no, batch in enumerate(batches, 1):
                 self._check_cancel()
                 first_index = batch[0][0]
@@ -408,7 +532,49 @@ class ProcessMixin:
                         },
                     )
 
+                provider_categories = {
+                    classify_exception(exc) for _idx, _record, exc in batch_failures
+                }
+                provider_unavailable = bool(batch_failures) and not results and provider_categories and provider_categories.issubset(
+                    self._TEMPORARY_PROVIDER_CATEGORIES
+                )
+                if provider_unavailable:
+                    provider_failure_streak += 1
+                else:
+                    provider_failure_streak = 0
+
                 processed += len(batch)
+
+                if provider_failure_streak >= TRANSLATION_PROVIDER_FAILURE_STREAK_LIMIT:
+                    provider_circuit_opened = True
+                    representative_exc = batch_failures[0][2]
+                    remaining_batches = batches[batch_no:]
+                    skipped_records = [item for remaining_batch in remaining_batches for item in remaining_batch]
+                    for idx, record in skipped_records:
+                        failed_records.append((idx, record, representative_exc))
+                    processed += len(skipped_records)
+                    self.log(
+                        "   🛑 Google Translate временно недоступен: останавливаю новые запросы "
+                        f"после {provider_failure_streak} неудачных пачек; отложено ещё "
+                        f"{len(skipped_records)} сегментов без сетевых запросов."
+                    )
+                    self._problem(
+                        "translation_provider_circuit_opened",
+                        level="warning",
+                        message=(
+                            "Защита остановила новые запросы к временно недоступному провайдеру, "
+                            "чтобы не растягивать перевод на часы и не усиливать rate-limit."
+                        ),
+                        service="google_translate",
+                        failure_streak=provider_failure_streak,
+                        deferred_without_requests=len(skipped_records),
+                        failure_categories=sorted(provider_categories),
+                        failure_kind="provider_circuit_open",
+                        impact="network_requests_paused_checkpoint_preserved",
+                        recovery_action="cooldown_then_single_batch_probe",
+                    )
+                    self._save_checkpoint(checkpoint_path, input_path, lang, translated)
+                    break
                 if new_translations - saved_translation_count >= TRANSLATION_CHECKPOINT_EVERY:
                     self._save_checkpoint(checkpoint_path, input_path, lang, translated)
                     saved_translation_count = new_translations
@@ -439,32 +605,104 @@ class ProcessMixin:
 
 # CODEX-PHASE VT3C DEFERRED_RETRY — second pass for network-deferred translation segments
             if failed_records:
+                failed_records = list({
+                    idx: (idx, record, exc) for idx, record, exc in failed_records
+                }.values())
+                failed_records.sort(key=lambda item: item[0])
+                failed_categories = {classify_exception(exc) for _idx, _record, exc in failed_records}
+                rate_limited = "rate_limit" in failed_categories
+                cooldown_sec = (
+                    TRANSLATION_RATE_LIMIT_COOLDOWN_SEC
+                    if rate_limited or provider_circuit_opened
+                    else TRANSLATION_PROVIDER_RETRY_COOLDOWN_SEC
+                )
                 self.log(
-                    f"   🔁 Второй проход: повторяю {len(failed_records)} отложенных сегментов "
-                    "после короткой паузы..."
+                    f"   🔁 Второй проход: {len(failed_records)} отложенных сегментов. "
+                    f"Сначала передышка {cooldown_sec:.0f}с, затем один пакет-проба."
                 )
                 self._problem(
                     "translation_deferred_retry_started",
                     level="warning",
-                    message="Начат второй проход по сегментам с сетевыми ошибками.",
+                    message=(
+                        "Начат второй проход по отложенным сегментам: после cooldown сначала "
+                        "проверяется один пакет, а не сотни отдельных запросов."
+                    ),
                     deferred_segments=len(failed_records),
+                    cooldown_sec=cooldown_sec,
+                    categories=sorted(failed_categories),
+                    retry_strategy="batch_probe_then_continue",
                 )
-                self._sleep_or_cancel(4.0)
+                self._save_checkpoint(checkpoint_path, input_path, lang, translated)
+                self._sleep_or_cancel(float(cooldown_sec))
+                self._close_translation_client()
+                try:
+                    self.translation_network_guard.request_probe_now()
+                except Exception:
+                    pass
+
+                retry_batches = split_translation_batches([
+                    (idx, record) for idx, record, _exc in failed_records
+                ])
                 still_failed = []
-                for retry_no, (idx, record, _first_error) in enumerate(failed_records, 1):
+                retry_provider_failure_streak = 0
+                for retry_batch_no, retry_batch in enumerate(retry_batches, 1):
                     self._check_cancel()
+                    first_index = retry_batch[0][0]
+                    last_index = retry_batch[-1][0]
                     self.set_progress(
                         51,
-                        f"Повтор перевода {retry_no}/{len(failed_records)} (сегмент {idx})...",
+                        f"Повтор перевода пачки {retry_batch_no}/{len(retry_batches)} "
+                        f"(сегменты {first_index}-{last_index})...",
                     )
-                    try:
-                        record["translated"] = self.translate_segment(record["source"], idx, attempts=3)
-                        if retry_no % 5 == 0:
-                            self._save_checkpoint(checkpoint_path, input_path, lang, translated)
-                    except CancelledError:
-                        raise
-                    except Exception as exc:
-                        still_failed.append((idx, record, exc))
+                    results, retry_failures = self.translate_records_batch(retry_batch, attempts=2)
+                    for idx, record in retry_batch:
+                        value = (results.get(idx) or "").strip()
+                        if value:
+                            record["translated"] = value
+                    retry_categories = {
+                        classify_exception(exc) for _idx, _record, exc in retry_failures
+                    }
+                    retry_provider_unavailable = bool(retry_failures) and not results and retry_categories and retry_categories.issubset(
+                        self._TEMPORARY_PROVIDER_CATEGORIES
+                    )
+                    if retry_provider_unavailable:
+                        retry_provider_failure_streak += 1
+                    else:
+                        retry_provider_failure_streak = 0
+                    still_failed.extend(retry_failures)
+
+                    if retry_provider_failure_streak >= 1:
+                        # После полноценного cooldown один провалившийся пакет-проба достаточен:
+                        # продолжать ещё 60+ запросов бессмысленно. Сохраняем прогресс и завершаем
+                        # этап ясной ошибкой, чтобы пользователь мог повторить запуск позже.
+                        representative_exc = retry_failures[0][2]
+                        remaining_retry_batches = retry_batches[retry_batch_no:]
+                        for remaining_batch in remaining_retry_batches:
+                            for idx, record in remaining_batch:
+                                still_failed.append((idx, record, representative_exc))
+                        self.log(
+                            "   ⛔ После передышки Google Translate всё ещё недоступен. "
+                            "Останавливаю сетевые запросы; прогресс сохранён для следующего запуска."
+                        )
+                        self._problem(
+                            "translation_provider_probe_failed",
+                            level="error",
+                            message=(
+                                "Проверочный пакет после cooldown снова получил сетевой/rate-limit сбой; "
+                                "дальнейшие запросы остановлены, checkpoint сохранён."
+                            ),
+                            service="google_translate",
+                            failure_categories=sorted(retry_categories),
+                            remaining_segments=sum(len(item) for item in remaining_retry_batches),
+                            failure_kind="provider_still_unavailable_after_cooldown",
+                            impact="translation_stopped_without_corrupt_output",
+                            recovery_action="automatic_routes_exhausted_retry_later",
+                        )
+                        break
+
+                    if retry_batch_no % 3 == 0 or retry_batch_no == len(retry_batches):
+                        self._save_checkpoint(checkpoint_path, input_path, lang, translated)
+
                 failed_records = still_failed
                 self._save_checkpoint(checkpoint_path, input_path, lang, translated)
 
@@ -508,6 +746,32 @@ class ProcessMixin:
             self._close_translation_client()
             self._check_cancel()
 
+            glossary_replacements = 0
+            glossary_segments = 0
+            if glossary.items:
+                for segment in translated:
+                    source_text = str(segment.get("source") or "")
+                    translated_text = str(segment.get("translated") or "")
+                    cleaned_text, replacement_count = glossary.apply(
+                        translated_text, source_text=source_text, return_count=True
+                    )
+                    if replacement_count:
+                        segment["translated"] = cleaned_text
+                        glossary_replacements += replacement_count
+                        glossary_segments += 1
+                if glossary_replacements:
+                    self._save_checkpoint(checkpoint_path, input_path, lang, translated)
+                    self.log(
+                        f"   📚 Словарь исправил {glossary_replacements} оставшихся без перевода "
+                        f"терминов в {glossary_segments} сегмент(ах)."
+                    )
+                    self._problem(
+                        "translation_glossary_applied",
+                        message="Словарь исправил термины, которые переводчик оставил в исходном виде.",
+                        replacements=glossary_replacements,
+                        segments=glossary_segments,
+                    )
+
 # CODEX-PHASE VT4 MANUAL_REVIEW — optional user correction before TTS
             if review_before_tts and self.review_callback:
                 self.current_stage = "manual_review"
@@ -531,6 +795,47 @@ class ProcessMixin:
                     "manual_review_wait_finished",
                     message="Пользователь применил правки и продолжил обработку.",
                     elapsed_sec=round(time.monotonic() - review_started_at, 3),
+                )
+
+            invalid_translation_outputs = []
+            for index, segment in enumerate(translated, 1):
+                source_text = (segment.get("source") or "").strip()
+                translated_text = (segment.get("translated") or "").strip()
+                if not source_text or not translated_text:
+                    continue
+                inspection = inspect_translation_response(translated_text, source_text=source_text)
+                if not inspection.get("valid"):
+                    invalid_translation_outputs.append({
+                        "segment_index": index,
+                        "reason": inspection.get("reason"),
+                        "response_length": inspection.get("response_length"),
+                        "response_sha256": inspection.get("response_sha256"),
+                        "response_preview": inspection.get("preview"),
+                        "source_preview": " ".join(source_text.split())[:240],
+                    })
+                    # Never persist a known provider error as completed progress.
+                    segment["translated"] = ""
+
+            if invalid_translation_outputs:
+                self._save_checkpoint(checkpoint_path, input_path, lang, translated)
+                self._problem(
+                    "translation_integrity_invalid_provider_response",
+                    level="error",
+                    message=(
+                        "Перед TTS обнаружены ответы сервиса перевода вместо перевода. "
+                        "Озвучка заблокирована, плохие записи удалены из контрольной точки."
+                    ),
+                    failure_kind="invalid_translation_output",
+                    impact="tts_blocked_to_prevent_spoken_server_errors",
+                    recovery_action="rerun_translation_from_clean_checkpoint",
+                    invalid_count=len(invalid_translation_outputs),
+                    invalid_samples=invalid_translation_outputs[:20],
+                    checkpoint_path=str(checkpoint_path),
+                )
+                raise RuntimeError(
+                    f"Обнаружено {len(invalid_translation_outputs)} ответов сервиса вместо перевода. "
+                    "Озвучка не запущена; повреждённые записи удалены из контрольной точки и "
+                    "будут переведены заново при следующем запуске."
                 )
 
             missing_translation_indices = [
@@ -610,6 +915,21 @@ class ProcessMixin:
                 source_lang=lang,
                 target_info=self.target_info,
             )
+            subtitle_paths = write_subtitle_files(
+                final_path,
+                translated,
+                pause_plan,
+                source_lang=lang,
+                target_info=self.target_info,
+                log=self.log,
+            )
+            if subtitle_paths:
+                self._problem(
+                    "subtitle_sidecars_written",
+                    message="Сохранены SRT-субтитры оригинала и перевода.",
+                    files={key: os.path.basename(value) for key, value in subtitle_paths.items()},
+                    pause_sync_adjusted=bool(pause_plan),
+                )
 
             try:
                 cache_release = self.tts_cache.release_used_entries()
@@ -740,9 +1060,24 @@ class ProcessMixin:
                     )
 
     def cleanup_temp(self):
-        if self.temp_dir and os.path.isdir(self.temp_dir):
-            try:
-                shutil.rmtree(self.temp_dir, ignore_errors=True)
-            except Exception as exc:
-                self.log(f"      ⚠️ Не удалось удалить временную папку: {exc}")
+        temp_dir = self.temp_dir
         self.temp_dir = ""
+        if not temp_dir or not os.path.isdir(temp_dir):
+            return
+        try:
+            shutil.rmtree(temp_dir)
+        except Exception as exc:
+            # Cleanup is secondary to the translation result, but silently
+            # suppressing it can leave gigabytes of media behind with no clue.
+            self.log(f"      ⚠️ Не удалось удалить временную папку: {exc}")
+            self._problem(
+                "temp_cleanup_failed",
+                level="warning",
+                message="Рабочая временная папка не удалена после обработки.",
+                temp_dir=temp_dir,
+                exception={
+                    "type": type(exc).__name__,
+                    "category": classify_exception(exc),
+                    "message": compact_exception(exc, max_len=1000),
+                },
+            )

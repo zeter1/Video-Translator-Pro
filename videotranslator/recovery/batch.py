@@ -8,6 +8,7 @@ from pathlib import Path
 from datetime import datetime
 import json
 import os
+from uuid import uuid4
 from videotranslator.config import BATCH_RECOVERY_SCHEMA_VERSION
 from videotranslator.core.diagnostics import diagnostic_json_value, safe_log_filename
 from videotranslator.core.io import atomic_write_json
@@ -33,7 +34,7 @@ def create_batch_recovery_state(files: list[str], output_dir: str, settings: dic
     now = datetime.now().astimezone().isoformat(timespec="seconds")
     return {
         "schema_version": BATCH_RECOVERY_SCHEMA_VERSION,
-        "batch_id": f"{datetime.now():%Y%m%d_%H%M%S_%f}_{os.getpid()}",
+        "batch_id": f"{datetime.now():%Y%m%d_%H%M%S_%f}_{os.getpid()}_{uuid4().hex}",
         "status": "running",
         "created_at": now,
         "updated_at": now,
@@ -65,19 +66,30 @@ def load_batch_recovery_state(path: Path | None = None) -> dict:
     try:
         with open(path, "r", encoding="utf-8-sig") as file:
             data = json.load(file)
+        if not isinstance(data, dict):
+            return {}
         if int(data.get("schema_version", 0)) != BATCH_RECOVERY_SCHEMA_VERSION:
             return {}
-        if not isinstance(data.get("files"), list) or not data.get("output_dir"):
+        files = data.get("files")
+        output_dir = data.get("output_dir")
+        if not isinstance(files, list) or not isinstance(output_dir, str) or not output_dir.strip():
+            return {}
+        if any(not isinstance(entry, dict) for entry in files):
             return {}
         return data
-    except (OSError, ValueError, TypeError):
+    except (OSError, ValueError, TypeError, OverflowError, UnicodeError):
         return {}
 
 
 def batch_recovery_pending_entries(state: dict) -> list[dict]:
+    if not isinstance(state, dict):
+        return []
+    files = state.get("files") or []
+    if not isinstance(files, list):
+        return []
     return [
-        entry for entry in state.get("files", [])
-        if str(entry.get("status") or "pending") != "succeeded"
+        entry for entry in files
+        if isinstance(entry, dict) and str(entry.get("status") or "pending") != "succeeded"
     ]
 
 

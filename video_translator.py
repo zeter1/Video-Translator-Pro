@@ -1,31 +1,21 @@
-"""Видео Переводчик PRO — compatibility launcher.
+"""Видео Переводчик PRO — compatibility launcher."""
 
-Рабочая реализация разнесена по пакету ``videotranslator``.
-Старый импорт ``import video_translator`` сохранён.
-"""
 import importlib
 import json
 import subprocess
 import sys
 
-from videotranslator.core.paths import configure_runtime_path, get_runtime_bin_dir
-
-configure_runtime_path()
-
-from videotranslator.public_api import *  # noqa: F401,F403,E402
-from videotranslator.bootstrap import main  # noqa: E402
+from videotranslator.core.paths import get_bundled_resource_dir
+from videotranslator.public_api import *  # noqa: F401,F403
+from videotranslator.bootstrap import main
 
 
 def _run_packaged_self_test() -> int:
-    """Check bundled Python modules and media tools without loading a Whisper model."""
+    """Check bundled imports and media tools without starting the GUI or a model."""
     module_names = (
-        "numpy",
-        "torch",
-        "whisper",
-        "edge_tts",
-        "gtts",
-        "deep_translator",
-        "moviepy",
+        "numpy", "torch", "whisper", "edge_tts", "gtts", "deep_translator",
+        "moviepy", "argostranslate", "transformers", "sentencepiece",
+        "huggingface_hub", "piper",
     )
     modules = {}
     for name in module_names:
@@ -35,41 +25,28 @@ def _run_packaged_self_test() -> int:
         except Exception as exc:
             modules[name] = f"{type(exc).__name__}: {exc}"
 
-    runtime_dir = get_runtime_bin_dir()
-    tools = {}
-    for name, args in {
-        "ffmpeg.exe": ["-version"],
-        "ffprobe.exe": ["-version"],
-    }.items():
+    runtime_dir = get_bundled_resource_dir()
+    media_tools = {}
+    for name in ("ffmpeg.exe", "ffprobe.exe"):
         path = runtime_dir / name
-        item = {"path": str(path), "exists": path.exists(), "returncode": None}
-        if path.exists():
+        item = {"exists": path.is_file(), "returncode": None}
+        if path.is_file():
             try:
                 completed = subprocess.run(
-                    [str(path), *args],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    timeout=20,
+                    [str(path), "-version"], stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT, timeout=20,
                 )
                 item["returncode"] = completed.returncode
-                item["output"] = (completed.stdout or "")[:500]
             except Exception as exc:
                 item["error"] = f"{type(exc).__name__}: {exc}"
-        tools[name] = item
+        media_tools[name] = item
 
-    payload = {
-        "frozen": bool(getattr(sys, "frozen", False)),
-        "runtime_bin_dir": str(runtime_dir),
-        "modules": modules,
-        "tools": tools,
-    }
-    print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
-    modules_ok = all(value is True for value in modules.values())
-    tools_ok = all(item.get("exists") and item.get("returncode") == 0 for item in tools.values())
-    return 0 if modules_ok and tools_ok else 1
+    print(json.dumps({"frozen": bool(getattr(sys, "frozen", False)),
+                      "modules": modules, "tools": media_tools},
+                     ensure_ascii=False, sort_keys=True))
+    return 0 if (all(value is True for value in modules.values())
+                 and all(item["exists"] and item["returncode"] == 0
+                         for item in media_tools.values())) else 1
 
 
 if __name__ == "__main__":

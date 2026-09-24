@@ -22,13 +22,17 @@ class TTSCache:
     """Постоянный потокобезопасный кэш TTS по тексту, голосу, скорости и провайдеру."""
 
     _maintenance_lock = threading.Lock()
+    # A long video can produce thousands of unique cache keys. Keeping one Lock
+    # object forever for every key made process memory grow with all text ever
+    # seen. A bounded striped pool preserves per-key mutual exclusion while
+    # allowing unrelated keys to share a lock occasionally.
+    KEY_LOCK_STRIPES = 256
 
     def __init__(self, directory: Path | None = None, max_bytes: int = TTS_CACHE_MAX_BYTES):
         self.directory = Path(directory or get_tts_cache_dir())
         self.directory.mkdir(parents=True, exist_ok=True)
         self.max_bytes = max(0, int(max_bytes))
-        self._locks_guard = threading.Lock()
-        self._locks = {}
+        self._key_locks = tuple(threading.Lock() for _ in range(self.KEY_LOCK_STRIPES))
         self._used_entries_lock = threading.Lock()
         self._used_entries = set()
         self._prepared_size_lock = threading.Lock()
@@ -51,8 +55,10 @@ class TTSCache:
         return hashlib.sha256(packed.encode("utf-8", errors="replace")).hexdigest()
 
     def key_lock(self, key: str):
-        with self._locks_guard:
-            return self._locks.setdefault(key, threading.Lock())
+        # ``hash`` is stable for equal strings for the lifetime of this process,
+        # which is exactly the lifetime of the lock pool. Cross-process cache
+        # writes already use unique temp files + atomic replace.
+        return self._key_locks[hash(str(key)) % len(self._key_locks)]
 
     def _audio_path(self, key: str, suffix: str = ".mp3") -> Path:
         return self.directory / f"{key}{suffix}"

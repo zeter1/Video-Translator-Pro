@@ -7,11 +7,77 @@ import hashlib
 import os
 from videotranslator.core.cancel import CancelledError
 from videotranslator.core.diagnostics import classify_exception, compact_exception, exception_chain, redact_diagnostic_text
+from videotranslator.config import NETWORK_CONNECT_TIMEOUT_SEC, NETWORK_READ_TIMEOUT_SEC
+from videotranslator.models.manager_v8 import RuntimeModelManager
+from videotranslator.tts.piper import PiperVoice
 from videotranslator.network.http import edge_tts_timeout_for_text, install_requests_default_timeout, progressive_retry_delay
 from videotranslator.sync.pause import normalize_tts_text
 
+
+def _piper_model_revision(model_path) -> str:
+    """Fast cache revision: changes when the ONNX model or sidecar config changes."""
+    model = os.fspath(model_path)
+    stat = os.stat(model)
+    config = model + ".json"
+    try:
+        config_stat = os.stat(config)
+        config_part = f"{config_stat.st_size}:{config_stat.st_mtime_ns}"
+    except OSError:
+        config_part = "0:0"
+    return f"{stat.st_size}:{stat.st_mtime_ns}:{config_part}"
+
+
 class TTSGenerateMixin:
     """Focused behavior-preserving mixin extracted for AI-local navigation."""
+
+    def _resolve_piper_cache_identities(self, *, report_substitution: bool = True) -> list[dict]:
+        """Resolve every usable local Piper voice in automatic fallback order."""
+        settings = getattr(self, "hybrid_translation_settings", {}) or {}
+        preferred_id = str(settings.get("preferred_piper_voice") or "piper-dmitri-ru")
+        manager = RuntimeModelManager()
+        list_method = getattr(manager, "installed_piper_voices", None)
+        if callable(list_method):
+            resolved = list(list_method(preferred_id, language="ru"))
+        else:  # Compatibility with older test doubles/extensions.
+            first = manager.resolve_piper_voice(preferred_id, language="ru")
+            resolved = [first] if first else []
+
+        identities = []
+        for resolved_voice_id, model_path in resolved:
+            identities.append({
+                "requested_voice_id": preferred_id,
+                "resolved_voice_id": str(resolved_voice_id),
+                "model_path": model_path,
+                "voice_revision": _piper_model_revision(model_path),
+            })
+
+        if report_substitution and identities and identities[0]["resolved_voice_id"] != preferred_id:
+            self._problem(
+                "tts_piper_voice_substituted",
+                level="warning",
+                message="Предпочитаемый локальный Piper-голос не установлен; выбран другой установленный локальный голос.",
+                preferred_piper_voice=preferred_id,
+                actual_piper_voice=identities[0]["resolved_voice_id"],
+            )
+        return identities
+
+    def _resolve_piper_cache_identity(self, *, report_substitution: bool = True) -> dict:
+        """Resolve the actual installed Piper voice and its file revision.
+
+        Prepared WAV cache entries must be tied to the model bytes, otherwise a
+        voice update can keep serving audio prepared from the previous model.
+        """
+        settings = getattr(self, "hybrid_translation_settings", {}) or {}
+        preferred_id = str(settings.get("preferred_piper_voice") or "piper-dmitri-ru")
+        identities = self._resolve_piper_cache_identities(report_substitution=report_substitution)
+        if not identities:
+            return {
+                "requested_voice_id": preferred_id,
+                "resolved_voice_id": "",
+                "model_path": None,
+                "voice_revision": "",
+            }
+        return identities[0]
 
     async def _edge_tts_async(self, text: str, path: str, voice: str, rate: str = "+0%"):
         import edge_tts
@@ -96,8 +162,8 @@ class TTSGenerateMixin:
                                 "tts_retry",
                                 level="warning",
                                 message=(
-                                    "Сетевая генерация Edge TTS не удалась; будет повтор. "
-                                    "gTTS разрешается только после ожидания смены VPN."
+                                    "Сетевая генерация Edge TTS не удалась; будет ограниченный повтор. "
+                                    "Дальше программа автоматически выберет Piper или gTTS."
                                 ),
                                 tts_segment_index=segment_index,
                                 attempt=attempt,
@@ -131,11 +197,103 @@ class TTSGenerateMixin:
                         if parallel_acquired:
                             self.edge_parallel_gate.release()
 
-        # CODEX-PHASE TG3 FALLBACK_GATE — preserve selected voice unless controlled gTTS fallback is allowed
-        # gTTS не поддерживает Edge rate. Для ускоренной версии достаточно
-        # обычной фразы: дальнейшую подгонку безопасно сделает atempo/rubberband.
+        # CODEX-PHASE TG3 FALLBACK_GATE — local Piper is allowed immediately because
+        # it does not touch the network.  Native Edge rate requests still return None;
+        # the normal-rate Piper audio can be time-stretched later by the existing pipeline.
         if rate_pct != 0:
             return None
+
+        settings = getattr(self, "hybrid_translation_settings", {}) or {}
+        if bool(settings.get("local_piper_fallback", True)) and target_code == "ru":
+            preferred_id = str(settings.get("preferred_piper_voice") or "piper-dmitri-ru")
+            piper_errors = []
+            try:
+                identities = self._resolve_piper_cache_identities()
+            except Exception as exc:
+                identities = []
+                piper_errors.append((preferred_id, exc))
+
+            for identity in identities:
+                preferred_id = identity["requested_voice_id"]
+                resolved_voice_id = identity["resolved_voice_id"]
+                model_path = identity["model_path"]
+                voice_revision = identity["voice_revision"]
+                try:
+                    piper_key = self.tts_cache.make_key(
+                        text, resolved_voice_id, 0, "piper", target_code,
+                        {"voice_revision": voice_revision},
+                    )
+                    with self.tts_cache.key_lock(piper_key):
+                        if self.tts_cache.restore(piper_key, path):
+                            self._increment_tts_stat("cache_hits")
+                            self._increment_tts_stat("piper_cache_hits")
+                            self._last_piper_provider_identity = identity
+                            self._set_final_tts_provider(segment_index, "piper")
+                            return "piper"
+                        if os.path.exists(path):
+                            os.remove(path)
+                        if getattr(self, "_piper_voice_engine", None) is None:
+                            self._piper_voice_engine = PiperVoice()
+                        self._piper_voice_engine.synthesize(text, model_path, path)
+                        if os.path.exists(path) and os.path.getsize(path) > 1000:
+                            self.tts_cache.store(
+                                piper_key,
+                                path,
+                                {
+                                    "provider": "piper",
+                                    "target_language": target_code,
+                                    "voice_model": resolved_voice_id,
+                                    "requested_voice_model": preferred_id,
+                                    "voice_path": str(model_path),
+                                    "voice_revision": voice_revision,
+                                    "text_length": len(text),
+                                    "text_sha256": text_hash,
+                                },
+                            )
+                            self._last_piper_provider_identity = identity
+                            count = self._increment_tts_stat("piper_created")
+                            if count <= 3 or count % 50 == 0:
+                                self.log(
+                                    f"        📴 [{segment_index}] Piper локально ({resolved_voice_id}); "
+                                    f"сегментов: {count}"
+                                )
+                            self._set_final_tts_provider(segment_index, "piper")
+                            return "piper"
+                        raise RuntimeError("Piper создал пустой WAV")
+                except Exception as exc:
+                    piper_errors.append((resolved_voice_id, exc))
+                    self._increment_tts_stat("piper_failures")
+                    self._problem(
+                        "tts_piper_voice_failed_trying_next",
+                        level="warning",
+                        message="Один локальный Piper-голос не сработал; программа автоматически пробует следующий установленный голос.",
+                        tts_segment_index=segment_index,
+                        preferred_piper_voice=preferred_id,
+                        failed_piper_voice=resolved_voice_id,
+                        remaining_local_voices=max(0, len(identities) - len(piper_errors)),
+                        exception={
+                            "type": type(exc).__name__,
+                            "category": classify_exception(exc),
+                            "message": compact_exception(exc, max_len=1000),
+                        },
+                    )
+
+            if piper_errors:
+                last_voice, last_exc = piper_errors[-1]
+                self._problem(
+                    "tts_piper_fallback_failed",
+                    level="warning",
+                    message="Все доступные локальные Piper-голоса исчерпаны; программа автоматически продолжит через сетевой TTS.",
+                    tts_segment_index=segment_index,
+                    preferred_piper_voice=preferred_id,
+                    attempted_piper_voices=[voice_id for voice_id, _exc in piper_errors],
+                    exception={
+                        "type": type(last_exc).__name__,
+                        "category": classify_exception(last_exc),
+                        "message": compact_exception(last_exc, max_len=1000),
+                        "chain": exception_chain(last_exc),
+                    },
+                )
 
         if not allow_gtts:
             self._increment_tts_stat("edge_deferred")
@@ -164,7 +322,18 @@ class TTSGenerateMixin:
                     gtts_acquired = True
                     if os.path.exists(path):
                         os.remove(path)
-                    gTTS(text=text, lang=gtts_lang, slow=False).save(path)
+                    try:
+                        speech = gTTS(
+                            text=text,
+                            lang=gtts_lang,
+                            slow=False,
+                            timeout=(NETWORK_CONNECT_TIMEOUT_SEC, NETWORK_READ_TIMEOUT_SEC),
+                        )
+                    except TypeError:
+                        # gTTS < 2.5 did not expose timeout; the requests default patch
+                        # remains as compatibility fallback, but current requirements use 2.5+.
+                        speech = gTTS(text=text, lang=gtts_lang, slow=False)
+                    speech.save(path)
                     if os.path.exists(path) and os.path.getsize(path) > 200:
                         self.gtts_network_guard.record_success("gtts")
                         self.tts_cache.store(

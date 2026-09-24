@@ -41,6 +41,12 @@ The synthetic checks require FFmpeg/ffprobe on PATH and libx264. They cover shor
 
 `tests/test_pause_media.py` uses real FFmpeg and a synthetic red-to-blue video transition to verify freeze insertion at zero, inside the first frame, in the middle and at the end. It checks selected stream duration, decoded frame colours and background silence/tone around the pause. Frame quantization is allowed within the fixture's frame tolerance; this does not prove arbitrary frame rates or every near-coincident pause plan.
 
+`tests/test_runtime_reliability_pass6.py` covers the protected-install runtime fallback,
+portable writable-path compatibility, corrupt settings/glossary preservation, atomic auxiliary
+report replacement and the GUI close guard while a local-model operation is active. These are
+offline/simulated boundaries: they do not prove real Windows `Program Files` ACL behavior,
+Task Manager termination during pip/model installation or live model/network downloads.
+
 ## Runtime-only evidence
 
 `test_encoder_inventory.py` checks one shared probe, transient failure followed by success, unparseable output, cancellation and misleading description text. Opt-in execution queries installed FFmpeg and verifies reuse for present/absent names without encoding or touching runtime state. These checks do not establish GPU availability or hardware encode speed.
@@ -64,3 +70,11 @@ Additional offline guards: `test_tts_duration_integrity.py` checks rejected base
 Opt-in `test_audio_selection.py` creates two tones in separate tracks, verifies default/first selection and measures the chosen frequency after extraction, ordinary mux and Pause Sync (including silence inside the pause). `test_final_audio_integration.py` also verifies that candidates with truncated video or audio are not published. All fixtures remain temporary.
 
 Unit/static checks do not prove live Whisper/GPU, Edge TTS/gTTS/VPN, NVENC or long real FFmpeg jobs on Windows. Those require actual runtime evidence.
+
+## Hybrid AI v9 Pass 9 — terminology / subtitles / ducking / Pause Sync
+
+`tests/test_quality_pass9.py` covers bounded glossary prompts, exact Whisper keyword-compatibility fallback, source-gated glossary cleanup, Pause Sync-aware SRT output and adaptive-ducking graph construction. With `VT_RUN_MEDIA_TESTS=1` it also renders a real FFmpeg WAV and verifies that the 440 Hz original is attenuated only while the translated sidechain voice is active.
+
+`tests/test_pause_media.py` now passes source FPS into Pause Sync so the regression fixture exercises the production frame-quantized `tpad` path. On the same FFmpeg 7.1.5 environment, the unmodified Pass 8 fixture produced ~3.92–3.96 s video for a 5 s expected timeline; Pass 9 produces the expected padded timeline and preserves post-pause content.
+
+`tests/test_final_audio_integration.py` additionally proves that a source whose selected video stream is severely truncated relative to the media timeline is rejected instead of being published as a successful translation.

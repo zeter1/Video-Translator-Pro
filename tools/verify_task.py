@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import compileall
 import importlib.util
 import json
@@ -11,7 +12,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 TOOLS = ROOT / "tools"
-TEST_FILE = ROOT / "tests" / "test_video_translator_diagnostics.py"
+TESTS_DIR = ROOT / "tests"
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 if str(TOOLS) not in sys.path:
@@ -20,10 +21,33 @@ if str(TOOLS) not in sys.path:
 from task_catalog import best_card
 
 
-def load_test_module():
-    spec = importlib.util.spec_from_file_location("vt_targeted_tests", TEST_FILE)
+def _test_class_index() -> dict[str, Path]:
+    """Map unittest class names to files without importing the entire suite."""
+    owners: dict[str, Path] = {}
+    duplicates: dict[str, list[Path]] = {}
+    for test_file in sorted(TESTS_DIR.glob("test_*.py")):
+        tree = ast.parse(test_file.read_text(encoding="utf-8"), filename=str(test_file))
+        for node in tree.body:
+            if not isinstance(node, ast.ClassDef):
+                continue
+            if node.name in owners and owners[node.name] != test_file:
+                duplicates.setdefault(node.name, [owners[node.name]]).append(test_file)
+            else:
+                owners[node.name] = test_file
+    if duplicates:
+        detail = "; ".join(
+            f"{name}: {', '.join(str(path.relative_to(ROOT)) for path in paths)}"
+            for name, paths in sorted(duplicates.items())
+        )
+        raise RuntimeError(f"ambiguous targeted test class names: {detail}")
+    return owners
+
+
+def load_test_module(test_file: Path):
+    module_name = f"vt_targeted_{test_file.stem}"
+    spec = importlib.util.spec_from_file_location(module_name, test_file)
     if spec is None or spec.loader is None:
-        raise RuntimeError(f"cannot load {TEST_FILE}")
+        raise RuntimeError(f"cannot load {test_file}")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -42,10 +66,19 @@ def static_checks() -> None:
 def run_selectors(selectors: list[str]) -> tuple[bool, int]:
     if not selectors:
         return True, 0
-    module = load_test_module()
+    class_index = _test_class_index()
+    module_cache = {}
     loader = unittest.TestLoader()
     suite = unittest.TestSuite()
     for selector in selectors:
+        class_name = selector.split(".", 1)[0]
+        test_file = class_index.get(class_name)
+        if test_file is None:
+            raise RuntimeError(f"targeted test class not found: {class_name}")
+        module = module_cache.get(test_file)
+        if module is None:
+            module = load_test_module(test_file)
+            module_cache[test_file] = module
         suite.addTests(loader.loadTestsFromName(selector, module))
     result = unittest.TextTestRunner(verbosity=2).run(suite)
     return result.wasSuccessful(), result.testsRun

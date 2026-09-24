@@ -34,6 +34,8 @@ class UIBatchRecoveryMixin:
     """Focused behavior-preserving mixin extracted for AI-local navigation."""
 
     def _restore_batch_settings(self, settings: dict):
+        if not isinstance(settings, dict):
+            settings = {}
         language_label = str(settings.get("language_label") or "")
         if language_label not in TARGET_LANGUAGES:
             language_label = get_target_language_by_code(settings.get("target_language"))
@@ -47,7 +49,11 @@ class UIBatchRecoveryMixin:
                 break
 
         self.var_keep.set(bool(settings.get("keep_original_audio")))
-        self.var_volume.set(max(0, min(100, int(settings.get("original_volume_pct", 15)))))
+        try:
+            original_volume = int(settings.get("original_volume_pct", 15))
+        except (TypeError, ValueError, OverflowError):
+            original_volume = 15
+        self.var_volume.set(max(0, min(100, original_volume)))
         self.var_review.set(bool(settings.get("review_before_tts")))
         audio = normalize_audio_settings(settings.get("audio") or {})
         self.var_voice_volume.set(audio["voice_volume_pct"])
@@ -60,6 +66,10 @@ class UIBatchRecoveryMixin:
 
     def _offer_batch_recovery(self):
         if self._closing or self._processing:
+            return
+        # The new durable Tasks queue owns restart recovery. Avoid offering the
+        # same legacy batch twice after it has already been migrated.
+        if hasattr(self, "_task_queue_state") and (self._task_queue_state.get("tasks") or []):
             return
         state = load_batch_recovery_state()
         if not state and self.problem_logger:
@@ -94,6 +104,19 @@ class UIBatchRecoveryMixin:
         if not state or str(state.get("status") or "") == "completed":
             return
 
+        # The durable queue keeps historical batch IDs even after the user removes
+        # a task. The legacy single-batch recovery dialog must respect that tombstone
+        # or it can resurrect an intentionally deleted/cleared queue item.
+        if hasattr(self, "_task_queue_state"):
+            batch_id = str(state.get("batch_id") or "")
+            known_ids = {
+                str(value or "")
+                for value in (self._task_queue_state.get("known_task_batch_ids") or [])
+                if str(value or "")
+            }
+            if batch_id and batch_id in known_ids:
+                return
+
         pending = batch_recovery_pending_entries(state)
         if not pending:
             return
@@ -101,19 +124,27 @@ class UIBatchRecoveryMixin:
         missing = []
         changed = []
         for entry in pending:
-            input_info = entry.get("input") or {}
+            input_info = entry.get("input")
+            if not isinstance(input_info, dict):
+                input_info = {}
             path = str(input_info.get("path") or "")
             if not path or not os.path.isfile(path):
                 missing.append(path or "<путь не записан>")
                 continue
             current = input_file_signature(path)
-            if (
-                input_info.get("size") is not None
-                and (
-                    int(input_info.get("size")) != int(current.get("size", -1))
-                    or int(input_info.get("modified_ns", -1)) != int(current.get("modified_ns", -2))
-                )
-            ):
+            signature_changed = False
+            if input_info.get("size") is not None:
+                try:
+                    signature_changed = (
+                        int(input_info.get("size")) != int(current.get("size", -1))
+                        or int(input_info.get("modified_ns", -1)) != int(current.get("modified_ns", -2))
+                    )
+                except (TypeError, ValueError, OverflowError):
+                    # Corrupt legacy metadata is evidence that the old identity cannot
+                    # be trusted. Treat it as changed instead of crashing the startup
+                    # recovery dialog.
+                    signature_changed = True
+            if signature_changed:
                 changed.append(path)
             available.append(path)
 

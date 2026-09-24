@@ -1,6 +1,6 @@
-openai-whisper
-edge-tts
-gTTS
+openai-whisper>=20250625
+edge-tts>=7.2.8
+gTTS>=2.5
 deep-translator
 moviepy<2
 numpy

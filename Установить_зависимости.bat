@@ -1,49 +1,56 @@
 @echo off
 setlocal
-pushd "%~dp0"
+chcp 65001 >nul
+cd /d "%~dp0"
+set PYTHONUTF8=1
 
-set "PYTHON_EXE="
-set "PYTHON_ARGS="
-
-where py >nul 2>nul
+py -3 --version >nul 2>&1
 if not errorlevel 1 (
-    set "PYTHON_EXE=py"
-    set "PYTHON_ARGS=-3"
-    goto install
+    set "PY=py -3"
+    goto :install
+)
+python --version >nul 2>&1
+if not errorlevel 1 (
+    set "PY=python"
+    goto :install
 )
 
-where python >nul 2>nul
-if not errorlevel 1 (
-    set "PYTHON_EXE=python"
-    goto install
-)
-
-call :try_python "%LocalAppData%\Programs\Python\Python313\python.exe"
-call :try_python "%LocalAppData%\Programs\Python\Python312\python.exe"
-call :try_python "%LocalAppData%\Programs\Python\Python311\python.exe"
-call :try_python "%LocalAppData%\Programs\Python\Python310\python.exe"
-call :try_python "%ProgramFiles%\Python313\python.exe"
-call :try_python "%ProgramFiles%\Python312\python.exe"
-call :try_python "%ProgramFiles%\Python311\python.exe"
-call :try_python "%ProgramFiles%\Python310\python.exe"
-call :try_python "%ProgramFiles(x86)%\Python313\python.exe"
-call :try_python "%ProgramFiles(x86)%\Python312\python.exe"
-call :try_python "%ProgramFiles(x86)%\Python311\python.exe"
-call :try_python "%ProgramFiles(x86)%\Python310\python.exe"
-if defined PYTHON_EXE goto install
-
-echo Python not found. Install Python 3.10-3.13 and enable "Add Python to PATH".
-goto end
+echo [ОШИБКА] Python не найден. Установите Python 3 и включите Add Python to PATH.
+pause
+exit /b 1
 
 :install
-"%PYTHON_EXE%" %PYTHON_ARGS% -m pip install --upgrade pip
-"%PYTHON_EXE%" %PYTHON_ARGS% -m pip install -r requirements.txt
-goto end
+echo Обновляю pip...
+%PY% -m pip install --upgrade pip
+if errorlevel 1 goto :fail
 
-:try_python
-if not defined PYTHON_EXE if exist "%~1" set "PYTHON_EXE=%~1"
-exit /b
+echo Устанавливаю основные зависимости...
+%PY% -m pip install -r requirements.txt
+if errorlevel 1 goto :fail
 
-:end
-popd
+echo Проверяю FFmpeg и ffprobe...
+%PY% tools\ensure_ffmpeg_windows.py --install
+if errorlevel 1 goto :fail
+
+if /I "%~1"=="ai" (
+    echo Устанавливаю локальные AI-движки для вкладки "Переводчики и голоса"...
+    %PY% -m pip install -r requirements-optional-ai.txt
+    if errorlevel 1 goto :fail
+) else (
+    echo.
+    echo Основные зависимости установлены.
+    echo Локальные переводчики и Piper можно поставить из вкладки программы.
+    echo Для установки всех AI-движков заранее запустите:
+    echo   Установить_зависимости.bat ai
+)
+
+echo.
+echo Готово.
 pause
+exit /b 0
+
+:fail
+echo.
+echo [ОШИБКА] Установка зависимостей завершилась неуспешно.
+pause
+exit /b 1

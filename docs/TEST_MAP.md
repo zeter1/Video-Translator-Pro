@@ -1,8 +1,8 @@
 # TEST MAP
 
-The historical suite is `tests/test_video_translator_diagnostics.py` (43 tests).
+The historical diagnostics suite is `tests/test_video_translator_diagnostics.py`, but current regression coverage is split across multiple `tests/test_*.py` modules.
 
-Do not read the whole test file for a local change. Task-cards contain exact selectors and `tools/verify_task.py "task"` runs only those selectors.
+Do not read the whole suite for a local change. Task-cards contain exact `Class.test_method` selectors; `tools/verify_task.py "task"` builds an AST class→file index, imports only the owning test module(s), and runs just those selectors.
 
 Main coverage families:
 
@@ -13,6 +13,7 @@ Main coverage families:
 | translation checkpoint/retry | `recovery/translation.py`, `pipeline/translation.py` |
 | batch recovery | `recovery/batch.py`, `ui/batch_recovery.py`, `ui/batch_worker.py` |
 | network/Edge/gTTS/cache | `network/guard.py`, `pipeline/tts_generate.py`, `tts/cache.py` |
+| local AI model store / startup maintenance | `models/manager_v8.py`, `ui/models_tab.py` |
 | Pause Sync/TTS timeline | `pipeline/timeline_build.py`, `timeline_mix.py` |
 | subprocess diagnostics | `media/process.py` |
 

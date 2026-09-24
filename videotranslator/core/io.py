@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from pathlib import Path
+from datetime import datetime
 import json
 import os
+import shutil
 import threading
 
 
@@ -53,3 +55,16 @@ def atomic_write_json(path: Path, data: dict):
                 temp_path.unlink()
         except OSError:
             pass
+
+
+def backup_corrupt_file(path: Path, label: str = "corrupt") -> Path | None:
+    """Preserve unreadable persistent state before a later save can replace it."""
+    path = Path(path)
+    if not path.is_file():
+        return None
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    backup = path.with_name(
+        f"{path.stem}.{label}.{stamp}.{os.getpid()}.{threading.get_ident()}{path.suffix}"
+    )
+    shutil.copy2(path, backup)
+    return backup

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from videotranslator.config import APP_DIAGNOSTIC_VERSION, BATCH_RECOVERY_SCHEMA_VERSION, BATCH_SIZE, DEFAULT_AUDIO_SETTINGS, DEFAULT_TARGET_LANGUAGE, EDGE_TTS_MAX_TIMEOUT_SEC, EDGE_TTS_MIN_TIMEOUT_SEC, EDGE_VOICE_PRESERVE_SEC, EDGE_VOICE_PROBE_INTERVAL_SEC, FINAL_ENCODE_MAX_TIMEOUT, FINAL_ENCODE_MIN_TIMEOUT, HEAVY_PAUSE_SYNC_COUNT, MASTER_LOUDNESS_I, MASTER_TRUE_PEAK, MAX_EMERGENCY_TEMPO, MAX_NATIVE_TTS_RATE, MAX_NATURAL_TEMPO, MIN_INSERTED_PAUSE, MIN_SYNC_GAP, MIN_TEMPO, MODELS_MAP, NETWORK_CONNECT_TIMEOUT_SEC, NETWORK_READ_TIMEOUT_SEC, NETWORK_STORM_RECOVERY_SUCCESSES, NETWORK_STORM_THRESHOLD, NETWORK_STORM_WINDOW_SEC, PAUSE_FINISH_MARGIN, PROBLEM_INDEX_SCHEMA_VERSION, PROBLEM_LOG_MAX_FILES, PROBLEM_LOG_RETENTION_DAYS, PROBLEM_LOG_SCHEMA_VERSION, PROBLEM_MANIFEST_SCHEMA_VERSION, PROBLEM_REPEAT_SAMPLE_EVENTS, PROBLEM_REPORT_REFRESH_SEC, PROBLEM_SESSION_STALE_SEC, SAMPLE_RATE, SETTINGS_LANGUAGE_VERSION, SPEECH_SPEED_LIMITS, TARGET_HEADROOM, TARGET_LANGUAGES, TOTAL_MAX_SPEECH_SPEED, TRANSLATION_BATCH_MAX_CHARS, TRANSLATION_BATCH_MAX_SEGMENTS, TRANSLATION_CHECKPOINT_EVERY, TRANSLATION_PROGRESS_EVERY, TTS_CACHE_MAX_BYTES, TTS_CACHE_ORPHAN_RETENTION_HOURS, TTS_CACHE_PREPARED_RETENTION_HOURS, TTS_CACHE_RECOVERY_RETENTION_DAYS, TTS_CACHE_SCHEMA_VERSION, TTS_CACHE_SIZE_CHECK_EVERY, TTS_CACHE_TARGET_BYTES, TTS_PREPARED_CACHE_SCHEMA_VERSION, TTS_PREPARE_WORKERS, VOICE_LIMIT, get_language_labels, get_target_language, get_target_language_by_code, get_voice_options, normalize_audio_settings
+from videotranslator.config import APP_DIAGNOSTIC_VERSION, BATCH_RECOVERY_SCHEMA_VERSION, TASK_QUEUE_SCHEMA_VERSION, BATCH_SIZE, DEFAULT_AUDIO_SETTINGS, DEFAULT_TARGET_LANGUAGE, EDGE_TTS_MAX_TIMEOUT_SEC, EDGE_TTS_MIN_TIMEOUT_SEC, EDGE_VOICE_PRESERVE_SEC, EDGE_VOICE_PROBE_INTERVAL_SEC, FINAL_ENCODE_MAX_TIMEOUT, FINAL_ENCODE_MIN_TIMEOUT, HEAVY_PAUSE_SYNC_COUNT, MASTER_LOUDNESS_I, MASTER_TRUE_PEAK, MAX_EMERGENCY_TEMPO, MAX_NATIVE_TTS_RATE, MAX_NATURAL_TEMPO, MIN_INSERTED_PAUSE, MIN_SYNC_GAP, MIN_TEMPO, MODELS_MAP, NETWORK_CONNECT_TIMEOUT_SEC, NETWORK_READ_TIMEOUT_SEC, NETWORK_STORM_RECOVERY_SUCCESSES, NETWORK_STORM_THRESHOLD, NETWORK_STORM_WINDOW_SEC, PAUSE_FINISH_MARGIN, PROBLEM_INDEX_SCHEMA_VERSION, PROBLEM_LOG_MAX_FILES, PROBLEM_LOG_RETENTION_DAYS, PROBLEM_LOG_SCHEMA_VERSION, PROBLEM_MANIFEST_SCHEMA_VERSION, PROBLEM_REPEAT_SAMPLE_EVENTS, PROBLEM_REPORT_REFRESH_SEC, PROBLEM_SESSION_STALE_SEC, SAMPLE_RATE, SETTINGS_LANGUAGE_VERSION, SPEECH_SPEED_LIMITS, TARGET_HEADROOM, TARGET_LANGUAGES, TOTAL_MAX_SPEECH_SPEED, TRANSLATION_BATCH_MAX_CHARS, TRANSLATION_BATCH_MAX_SEGMENTS, TRANSLATION_CHECKPOINT_EVERY, TRANSLATION_PROGRESS_EVERY, TRANSLATION_MIN_REQUEST_INTERVAL_SEC, TRANSLATION_PROVIDER_FAILURE_STREAK_LIMIT, TRANSLATION_PROVIDER_RETRY_COOLDOWN_SEC, TRANSLATION_RATE_LIMIT_COOLDOWN_SEC, TTS_CACHE_MAX_BYTES, TTS_CACHE_ORPHAN_RETENTION_HOURS, TTS_CACHE_PREPARED_RETENTION_HOURS, TTS_CACHE_RECOVERY_RETENTION_DAYS, TTS_CACHE_SCHEMA_VERSION, TTS_CACHE_SIZE_CHECK_EVERY, TTS_CACHE_TARGET_BYTES, TTS_PREPARED_CACHE_SCHEMA_VERSION, TTS_PREPARE_WORKERS, VOICE_LIMIT, get_language_labels, get_target_language, get_target_language_by_code, get_voice_options, normalize_audio_settings
 from videotranslator.core.cancel import CancelledError
 from videotranslator.core.diagnostics import classify_exception, compact_exception, diagnostic_json_value, diagnostic_signature_value, exception_chain, redact_diagnostic_text, safe_log_filename, should_store_problem_occurrence
 from videotranslator.core.io import atomic_write_json, atomic_write_text, read_json_file
@@ -20,6 +20,7 @@ from videotranslator.network.http import edge_tts_timeout_for_text, install_requ
 from videotranslator.pipeline.translator import VideoTranslator
 from videotranslator.recovery.batch import batch_recovery_pending_entries, create_batch_recovery_state, get_batch_recovery_state_path, input_file_signature, load_batch_recovery_state, reconstruct_batch_recovery_state_from_problem_log, save_batch_recovery_state
 from videotranslator.recovery.translation import load_translation_checkpoint, save_translation_checkpoint, translation_checkpoint_path, translation_segment_key
+from videotranslator.recovery.tasks import create_task_queue_state, create_translation_task, find_task, get_task_queue_state_path, load_task_queue_state, next_runnable_task, recover_interrupted_tasks, save_task_queue_state
 from videotranslator.reports.output import make_unique_output_path, write_translated_text_file, write_translation_report
 from videotranslator.speech.whisper import get_whisper_model, is_cuda_available
 from videotranslator.sync.pause import calc_quality_slot, edge_rate_from_speed, make_filter_script_for_pauses, merge_nearby_pause_plan, merge_short_segments, normalize_tts_text, sanitize_pause_plan
@@ -33,6 +34,7 @@ __all__ = [
     'App',
     'BATCH_RECOVERY_SCHEMA_VERSION',
     'BATCH_SIZE',
+    'TASK_QUEUE_SCHEMA_VERSION',
     'CancelledError',
     'DEFAULT_AUDIO_SETTINGS',
     'DEFAULT_TARGET_LANGUAGE',
@@ -80,6 +82,10 @@ __all__ = [
     'TRANSLATION_BATCH_MAX_SEGMENTS',
     'TRANSLATION_CHECKPOINT_EVERY',
     'TRANSLATION_PROGRESS_EVERY',
+    'TRANSLATION_MIN_REQUEST_INTERVAL_SEC',
+    'TRANSLATION_PROVIDER_FAILURE_STREAK_LIMIT',
+    'TRANSLATION_PROVIDER_RETRY_COOLDOWN_SEC',
+    'TRANSLATION_RATE_LIMIT_COOLDOWN_SEC',
     'TTSCache',
     'TTS_CACHE_MAX_BYTES',
     'TTS_CACHE_ORPHAN_RETENTION_HOURS',
@@ -108,6 +114,8 @@ __all__ = [
     'cleanup_old_problem_logs',
     'compact_exception',
     'create_batch_recovery_state',
+    'create_task_queue_state',
+    'create_translation_task',
     'diagnostic_json_value',
     'diagnostic_signature_value',
     'edge_rate_from_speed',
@@ -120,11 +128,13 @@ __all__ = [
     'final_video_encoder_attempts',
     'find_ffmpeg',
     'find_ffprobe',
+    'find_task',
     'find_previous_problem_summary',
     'fmt_time',
     'format_subprocess_command',
     'get_audio_duration',
     'get_batch_recovery_state_path',
+    'get_task_queue_state_path',
     'get_language_labels',
     'get_logs_dir',
     'get_media_duration',
@@ -142,6 +152,7 @@ __all__ = [
     'installed_package_versions',
     'is_cuda_available',
     'load_batch_recovery_state',
+    'load_task_queue_state',
     'load_translation_checkpoint',
     'log_subprocess_result',
     'make_filter_script_for_pauses',
@@ -149,6 +160,7 @@ __all__ = [
     'master_voice_audio',
     'merge_nearby_pause_plan',
     'merge_short_segments',
+    'next_runnable_task',
     'normalize_audio_settings',
     'normalize_tts_text',
     'output_has_video_and_audio',
@@ -158,11 +170,13 @@ __all__ = [
     'progressive_retry_delay',
     'read_json_file',
     'reconstruct_batch_recovery_state_from_problem_log',
+    'recover_interrupted_tasks',
     'redact_diagnostic_text',
     'run_subprocess',
     'safe_log_filename',
     'sanitize_pause_plan',
     'save_batch_recovery_state',
+    'save_task_queue_state',
     'save_translation_checkpoint',
     'should_store_problem_occurrence',
     'speed_audio',

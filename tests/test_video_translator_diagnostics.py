@@ -136,6 +136,55 @@ class ProblemLoggerTests(unittest.TestCase):
             self.assertEqual(summary["tts_voice"]["fallback_provider"], "gtts")
             self.assertTrue(summary["tts_voice"]["voice_may_differ"])
 
+    def test_closed_session_marks_active_network_storm_as_unresolved_not_active(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            directory = Path(temp_dir)
+            with mock.patch.object(vt, "get_problem_logs_dir", return_value=directory):
+                logger = vt.ProblemLogger()
+                logger.event(
+                    "network_storm_started",
+                    level="warning",
+                    service="edge_tts",
+                    failures_in_window=3,
+                    pause_sec=30,
+                )
+                logger.close()
+
+            summary = json.loads(logger.summary_path.read_text(encoding="utf-8"))
+            edge_state = summary["network"]["active_services"]["edge_tts"]
+            self.assertFalse(edge_state["active"])
+            self.assertTrue(edge_state["unresolved_at_close"])
+            self.assertEqual(summary["network"]["incidents_unresolved_at_close"], 1)
+
+    def test_pause_sync_quality_is_saved_and_rendered_for_codex(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            directory = Path(temp_dir)
+            with mock.patch.object(vt, "get_problem_logs_dir", return_value=directory):
+                logger = vt.ProblemLogger()
+                logger.event(
+                    "pause_sync_quality_summary",
+                    pause_count=214,
+                    total_pause_sec=211.521,
+                    source_video_duration_sec=3102.86,
+                    pause_ratio=0.06817,
+                    severe_pause_count=21,
+                    max_pause_sec=7.48,
+                    top_pause_segments=[
+                        {"segments": [498], "at_sec": 2948.0, "duration_sec": 7.48},
+                        {"segments": [511], "at_sec": 3031.0, "duration_sec": 6.80},
+                    ],
+                )
+                logger.close()
+
+            summary = json.loads(logger.summary_path.read_text(encoding="utf-8"))
+            self.assertEqual(summary["pause_sync"]["pause_count"], 214)
+            self.assertEqual(summary["pause_sync"]["severe_pause_count"], 21)
+            report = logger.report_path.read_text(encoding="utf-8")
+            self.assertIn("## Качество Pause Sync", report)
+            self.assertIn("6.8%", report)
+            self.assertIn("seg 498: +7.48с", report)
+            self.assertIn("pause_sync_quality", report)
+
     def test_problem_summary_tracks_tts_cache_cleanup(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             directory = Path(temp_dir)
@@ -310,6 +359,51 @@ class ProblemLoggerTests(unittest.TestCase):
             )
             self.assertIn("Карточки исправления проблем", logger.report_path.read_text(encoding="utf-8"))
 
+
+    def test_translation_provider_error_has_ai_readable_root_cause_card(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            directory = Path(temp_dir)
+            with mock.patch.object(vt, "get_problem_logs_dir", return_value=directory):
+                logger = vt.ProblemLogger()
+                logger.event(
+                    "translation_provider_response_rejected",
+                    level="warning",
+                    message="Сервис вернул страницу ошибки вместо перевода.",
+                    input_path="C:/video.mp4",
+                    stage="translation",
+                    failure_kind="provider_response_invalid",
+                    impact="blocked_before_checkpoint_and_tts",
+                    recovery_action="retry_same_segment_then_defer",
+                    segment_index=25,
+                    attempt=1,
+                    attempts_total=3,
+                    response_validation={
+                        "valid": False,
+                        "reason": "provider_error_page_500",
+                        "signals": ["server_error_phrase", "google_error_sentence", "http_status_500"],
+                        "response_length": 109,
+                        "response_sha256": "abc",
+                        "preview": "Error 500 (Server Error)...",
+                    },
+                )
+                logger.close()
+
+            record = json.loads(logger.problem_path.read_text(encoding="utf-8").splitlines()[0])
+            self.assertEqual(record["diagnostic"]["pipeline_stage"], "translation")
+            self.assertEqual(record["diagnostic"]["failure_kind"], "provider_response_invalid")
+            self.assertEqual(record["diagnostic"]["impact"], "blocked_before_checkpoint_and_tts")
+            summary = json.loads(logger.summary_path.read_text(encoding="utf-8"))
+            card = summary["codex_analysis"]["issue_cards"][0]
+            self.assertEqual(card["playbook"], "translation_provider_response")
+            self.assertEqual(card["cause_status"], "confirmed_invalid_provider_payload")
+            self.assertEqual(
+                card["confirmed_evidence"]["context"]["response_validation"]["reason"],
+                "provider_error_page_500",
+            )
+            report = logger.report_path.read_text(encoding="utf-8")
+            self.assertIn("translation_response=provider_error_page_500", report)
+            self.assertIn("Контракт анализа для ChatGPT / Codex", report)
+
     def test_media_validation_problem_explains_ffmpeg_success_and_duration_delta(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             directory = Path(temp_dir)
@@ -453,6 +547,7 @@ class TranslationCheckpointTests(unittest.TestCase):
 
             with mock.patch.object(vt, "find_ffmpeg", return_value="ffmpeg"), \
                     mock.patch.object(vt, "find_ffprobe", return_value="ffprobe"), \
+                    mock.patch("videotranslator.pipeline.process.select_audio_stream", return_value=0), \
                     mock.patch.object(vt, "get_media_duration", return_value=10.0), \
                     mock.patch.object(vt, "extract_audio_for_whisper", return_value=True), \
                     mock.patch.object(vt, "get_whisper_model", return_value=FakeWhisperModel()), \
@@ -517,7 +612,7 @@ class BatchRecoveryTests(unittest.TestCase):
             pending = vt.batch_recovery_pending_entries(loaded)
 
             self.assertEqual(len(pending), 1)
-            self.assertTrue(os.path.samefile(pending[0]["input"]["path"], second))
+            self.assertEqual(pending[0]["input"]["path"], str(second.resolve()))
             self.assertFalse(list(directory.glob("*.tmp")))
 
     def test_old_problem_log_recovery_ignores_empty_or_directory_path(self):
@@ -1027,6 +1122,8 @@ class NetworkAndCacheTests(unittest.TestCase):
             self.assertEqual(translator._run_edge_tts.call_count, 3)
 
     def test_edge_storm_waits_for_selected_voice_before_gtts_fallback(self):
+        # Historical test name is kept because task routing selects it directly.
+        # Current contract: no VPN popup/wait; recovery enables gTTS automatically.
         with tempfile.TemporaryDirectory() as temp_dir:
             notices = []
             translator = vt.VideoTranslator(
@@ -1034,7 +1131,9 @@ class NetworkAndCacheTests(unittest.TestCase):
                 cancel_event=threading.Event(),
                 network_notice_cb=lambda action, details: notices.append((action, details)),
             )
+            translator.temp_dir = temp_dir
             translator.tts_cache = vt.TTSCache(Path(temp_dir))
+            translator._sleep_or_cancel = mock.Mock(side_effect=AssertionError("VPN wait must not run"))
             translator._run_edge_tts = mock.Mock(side_effect=AssertionError("Edge must be bypassed"))
             for _ in range(5):
                 translator.edge_network_guard.record_failure("edge_tts", TimeoutError("vpn timeout"))
@@ -1051,19 +1150,23 @@ class NetworkAndCacheTests(unittest.TestCase):
                     "Обычная фраза", str(Path(temp_dir) / "normal.mp3"), "voice",
                     rate_pct=0, segment_index=8,
                 )
-                translator._enable_gtts_fallback("test_timeout")
+                decision = translator._await_selected_voice_or_fallback(
+                    "Обычная фраза", "voice", 8
+                )
                 result = translator.generate_tts(
                     "Обычная фраза", str(Path(temp_dir) / "fallback.mp3"), "voice",
                     rate_pct=0, segment_index=8,
                 )
 
             self.assertFalse(deferred)
-            self.assertTrue(result)
+            self.assertEqual(decision, "gtts_allowed")
+            self.assertEqual(result, "gtts")
             translator._run_edge_tts.assert_not_called()
+            translator._sleep_or_cancel.assert_not_called()
             self.assertTrue(translator.edge_network_guard.is_active())
             self.assertEqual(translator.tts_stats["gtts_fallback"], 1)
-            self.assertEqual(notices[0][0], "unstable")
-            self.assertEqual(notices[-1][0], "fallback")
+            self.assertEqual(notices, [])
+            self.assertEqual(translator._tts_fallback_reason, "automatic_edge_unavailable")
 
     def test_manual_vpn_probe_opens_storm_for_immediate_check(self):
         guard = vt.NetworkStormGuard(service="edge_tts", threshold=2, initial_pause_sec=30)
@@ -1281,6 +1384,84 @@ class TTSParallelTests(unittest.TestCase):
         self.assertEqual([path for _delay, path in captured], [
             "segment-1.wav", "segment-2.wav", "segment-3.wav",
         ])
+
+    def test_final_provider_accounting_removes_temporary_gtts_when_edge_wins(self):
+        translator = vt.VideoTranslator(lambda _message: None, cancel_event=threading.Event())
+        translator.speech_speed_limit = 1.25
+        translator._mark_gtts_fallback(1)
+        translator._get_prepared_tts_audio = mock.Mock(side_effect=[
+            ("base-gtts.wav", "gtts"),
+            ("fast-edge.wav", "edge_tts"),
+        ])
+
+        with mock.patch("videotranslator.pipeline.tts_prepare.get_audio_duration", side_effect=[2.0, 1.4]), \
+             mock.patch("videotranslator.pipeline.tts_prepare.edge_rate_from_speed", return_value=25):
+            path, _duration, stats = translator._prepare_tts_segment("text", "voice", 1, 1.5, 1.5)
+
+        self.assertEqual(path, "fast-edge.wav")
+        self.assertEqual(stats["source_provider"], "edge_tts")
+        self.assertEqual(translator.tts_stats["gtts_fallback"], 0)
+
+    def test_final_voice_repair_replaces_gtts_segment_after_successful_probe(self):
+        translator = vt.VideoTranslator(lambda _message: None, cancel_event=threading.Event())
+        translator.speech_speed_limit = 1.20
+        calls = {}
+        captured = []
+
+        def fake_prepare(_text, _voice, index, _target_slot, _hard_slot):
+            calls[index] = calls.get(index, 0) + 1
+            if index == 2 and calls[index] == 1:
+                translator._set_final_tts_provider(index, "gtts")
+                return "segment-2-gtts.wav", 0.5, {"total_speed": 1.0, "tempo": 1.0, "source_provider": "gtts"}
+            translator._set_final_tts_provider(index, "edge_tts")
+            return f"segment-{index}-edge.wav", 0.5, {"total_speed": 1.0, "tempo": 1.0, "source_provider": "edge_tts"}
+
+        translator._prepare_tts_segment = fake_prepare
+        translator._probe_edge_voice_once = mock.Mock(return_value=True)
+        translator._mix_in_batches = lambda segments, _duration: captured.extend(segments) or "mixed.wav"
+        segments = [
+            {"start": 0.0, "end": 1.0, "source": "s1", "translated": "t1"},
+            {"start": 1.0, "end": 2.0, "source": "s2", "translated": "t2"},
+        ]
+
+        with mock.patch.object(vt, "master_voice_audio", return_value="master.wav"):
+            result, _pauses, _duration = translator.build_timeline(segments, 3.0, "voice")
+
+        self.assertEqual(result, "master.wav")
+        self.assertEqual(calls[2], 2)
+        self.assertEqual(translator.tts_stats["gtts_fallback"], 0)
+        self.assertEqual(translator.tts_stats["gtts_repaired_to_edge"], 1)
+        self.assertIn((1000, "segment-2-edge.wav"), captured)
+        translator._probe_edge_voice_once.assert_called_once()
+
+    def test_final_voice_repair_keeps_gtts_without_wait_when_probe_fails(self):
+        translator = vt.VideoTranslator(lambda _message: None, cancel_event=threading.Event())
+        calls = {}
+        captured = []
+
+        def fake_prepare(_text, _voice, index, _target_slot, _hard_slot):
+            calls[index] = calls.get(index, 0) + 1
+            if index == 2:
+                translator._set_final_tts_provider(index, "gtts")
+                return "segment-2-gtts.wav", 0.5, {"total_speed": 1.0, "tempo": 1.0, "source_provider": "gtts"}
+            translator._set_final_tts_provider(index, "edge_tts")
+            return "segment-1-edge.wav", 0.5, {"total_speed": 1.0, "tempo": 1.0, "source_provider": "edge_tts"}
+
+        translator._prepare_tts_segment = fake_prepare
+        translator._probe_edge_voice_once = mock.Mock(return_value=False)
+        translator._mix_in_batches = lambda segments, _duration: captured.extend(segments) or "mixed.wav"
+        segments = [
+            {"start": 0.0, "end": 1.0, "source": "s1", "translated": "t1"},
+            {"start": 1.0, "end": 2.0, "source": "s2", "translated": "t2"},
+        ]
+
+        with mock.patch.object(vt, "master_voice_audio", return_value="master.wav"):
+            translator.build_timeline(segments, 3.0, "voice")
+
+        self.assertEqual(calls[2], 1)
+        self.assertEqual(translator.tts_stats["gtts_fallback"], 1)
+        self.assertFalse(translator.tts_stats["voice_repair_probe_success"])
+        self.assertIn((1000, "segment-2-gtts.wav"), captured)
 
     def test_speed_limit_is_normalized_to_supported_value(self):
         self.assertEqual(vt.normalize_audio_settings({"speech_speed_limit": 1.19})["speech_speed_limit"], 1.20)

@@ -14,13 +14,33 @@ def safe_log_filename(value: str, max_len: int = 80) -> str:
     return (value[:max_len].strip("._-") or "session")
 
 
+def _redact_credentials(text: str) -> str:
+    """Redacts credential-shaped values shared by compact and multiline diagnostics."""
+    text = re.sub(
+        r"(?i)(authorization\s*[:=]\s*)(?:(?:bearer|basic)\s+)?[^\s,;]+",
+        r"\1<скрыто>",
+        text,
+    )
+    text = re.sub(
+        r"(?i)(api[_-]?key|access[_-]?token|refresh[_-]?token)(\s*[:=]\s*)([^\s,;]+)",
+        r"\1\2<скрыто>",
+        text,
+    )
+    return re.sub(
+        r"(?i)(cookie|set-cookie)(\s*[:=]\s*)[^\r\n]+",
+        r"\1\2<скрыто>",
+        text,
+    )
+
+
 def compact_exception(exc: Exception, max_len: int = 360) -> str:
-    """Сжимает сетевые ошибки для логов и прячет длинные URL с токенами."""
+    """Сжимает сетевые ошибки для логов и прячет длинные URL/credentials."""
     text = str(exc) or type(exc).__name__
     text = re.sub(r"((?:https?|wss?)://[^\s'\"<>?)]+)\?[^\s'\"<>)]*", r"\1?...", text)
     text = re.sub(r"(url:\s+[^\s?]+)\?[^\s)]*", r"\1?...", text, flags=re.IGNORECASE)
-    text = re.sub(r"(TrustedClientToken=)[^&\s)]+", r"\1...", text)
-    text = re.sub(r"(ConnectionId=)[^&\s)]+", r"\1...", text)
+    text = re.sub(r"(TrustedClientToken=)[^&\s)]+", r"\1...", text, flags=re.IGNORECASE)
+    text = re.sub(r"(ConnectionId=)[^&\s)]+", r"\1...", text, flags=re.IGNORECASE)
+    text = _redact_credentials(text)
     text = re.sub(r"\s+", " ", text).strip()
     if len(text) > max_len:
         text = text[: max_len - 3].rstrip() + "..."
@@ -34,15 +54,12 @@ def redact_diagnostic_text(value, max_len: int = 30000) -> str:
     text = re.sub(r"(url:\s+[^\s?]+)\?[^\s)]*", r"\1?...", text, flags=re.IGNORECASE)
     text = re.sub(r"(TrustedClientToken=)[^&\s)]+", r"\1...", text, flags=re.IGNORECASE)
     text = re.sub(r"(ConnectionId=)[^&\s)]+", r"\1...", text, flags=re.IGNORECASE)
-    text = re.sub(
-        r"(?i)(authorization|api[_-]?key|access[_-]?token|refresh[_-]?token)(\s*[:=]\s*)([^\s,;]+)",
-        r"\1\2<скрыто>",
-        text,
-    )
+    # Keep credential handling in one owner so compact exceptions and multiline
+    # diagnostics cannot silently drift apart again.
+    text = _redact_credentials(text)
     if len(text) > max_len:
         text = text[: max_len - 20].rstrip() + "\n...<обрезано>"
     return text
-
 
 def classify_exception(exc: Exception | None) -> str:
     """Короткая категория ошибки для фильтрации JSONL без разбора длинного текста."""
@@ -56,6 +73,8 @@ def classify_exception(exc: Exception | None) -> str:
         return "network_connection"
     if any(x in text for x in ("429", "too many requests", "rate limit")):
         return "rate_limit"
+    if "invalidtranslationresponseerror" in text or "translation provider response rejected" in text:
+        return "translation_provider_response"
     if isinstance(exc, FileNotFoundError):
         return "file_not_found"
     if isinstance(exc, PermissionError):

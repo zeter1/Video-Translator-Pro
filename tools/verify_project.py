@@ -154,6 +154,31 @@ def check_context_benchmark():
         raise RuntimeError("context benchmark did not pass")
 
 
+def check_distribution_contract():
+    required = [
+        ROOT / "Запустить.bat",
+        ROOT / "Установить_зависимости.bat",
+        ROOT / "build_exe.bat",
+        ROOT / "tools" / "build_exe.py",
+        ROOT / "tools" / "ensure_ffmpeg_windows.py",
+        ROOT / "pytest.ini",
+        ROOT / "requirements.txt",
+        ROOT / "requirements-optional-ai.txt",
+    ]
+    missing = [path.name for path in required if not path.is_file()]
+    if missing:
+        raise RuntimeError(f"distribution files missing: {missing}")
+
+    pytest_config = (ROOT / "pytest.ini").read_text(encoding="utf-8")
+    if "testpaths = tests" not in pytest_config or "repair_evidence" not in pytest_config:
+        raise RuntimeError("pytest discovery is not isolated from historical repair evidence")
+
+    for tool in ("build_exe.py", "ensure_ffmpeg_windows.py"):
+        help_result = command(str(ROOT / "tools" / tool), "--help")
+        if help_result.returncode:
+            raise RuntimeError(help_result.stderr or help_result.stdout)
+
+
 def check_tests():
     env = dict(os.environ)
     env["PYTHONPATH"] = str(ROOT)
@@ -180,6 +205,7 @@ def main():
         ("CODE_MAP v3 + canonical ownership", check_index),
         ("deterministic task cards + targeted verification", check_navigation_harness),
         ("context benchmark", check_context_benchmark),
+        ("Windows distribution/build contract", check_distribution_contract),
         ("complete regression suite (at least 43 tests)", check_tests),
     ]
     ok = all(run(label, fn) for label, fn in checks)

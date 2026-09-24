@@ -35,6 +35,57 @@ class TranslationCancellationTests(unittest.TestCase):
     def test_cancel_during_plan_keeps_existing_complete_checkpoint(self):
         self._check_interrupted_progress(vt.CancelledError(), cancel_plan=True)
 
+
+    def test_invalid_server_error_checkpoint_entry_is_retranslated(self):
+        with tempfile.TemporaryDirectory() as directory, ExitStack() as stack:
+            root = Path(directory)
+            checkpoint = root / "checkpoint.json"
+            source = root / "source.mp4"
+            source.write_bytes(b"fixture")
+            stack.enter_context(mock.patch("videotranslator.tts.cache.get_tts_cache_dir", return_value=root / "cache"))
+            stack.enter_context(mock.patch("videotranslator.pipeline.process.is_cuda_available", return_value=False))
+            stack.enter_context(mock.patch("videotranslator.pipeline.process.select_audio_stream", return_value=1))
+            model = types.SimpleNamespace(transcribe=lambda *a, **k: {
+                "language": "en", "text": "one two",
+                "segments": [
+                    {"start": 0, "end": 2, "text": "one"},
+                    {"start": 3, "end": 5, "text": "two"},
+                ],
+            })
+            for name, value in {
+                "find_ffmpeg": "ffmpeg", "find_ffprobe": "ffprobe",
+                "get_media_duration": 6.0, "extract_audio_for_whisper": True,
+                "get_whisper_model": model, "translation_checkpoint_path": checkpoint,
+            }.items():
+                stack.enter_context(mock.patch.object(vt, name, return_value=value))
+
+            bad = "Error 500 (Server Error)!!1500.There was an error. Please try again later.That’s all we know."
+            vt.save_translation_checkpoint(checkpoint, str(source), "en", "ru", [
+                {"start": 0, "end": 2, "source": "one", "translated": bad},
+                {"start": 3, "end": 5, "source": "two", "translated": "два"},
+            ])
+
+            events = []
+            translator = vt.VideoTranslator(
+                lambda _: None,
+                cancel_event=threading.Event(),
+                problem_cb=lambda event, **details: events.append((event, details)),
+            )
+            seen = []
+
+            def inspect_pending(records, **kwargs):
+                seen.extend(index for index, _record in records)
+                raise vt.CancelledError()
+
+            translator.translate_records_batch = inspect_pending
+            args = (str(source), str(root / "out.mp4"), "ru-RU-DmitryNeural", "small", False, 0)
+            self.assertFalse(translator.process(*args))
+            self.assertEqual(seen, [1])
+            self.assertTrue(any(event == "translation_checkpoint_entry_rejected" for event, _ in events))
+            loaded = vt.load_translation_checkpoint(checkpoint)
+            self.assertNotIn(vt.translation_segment_key(0, 2, "one"), loaded)
+            self.assertEqual(loaded.get(vt.translation_segment_key(3, 5, "two")), "два")
+
     def _check_interrupted_progress(self, interruption, cancel_plan=False):
         with tempfile.TemporaryDirectory() as directory, ExitStack() as stack:
             root = Path(directory)

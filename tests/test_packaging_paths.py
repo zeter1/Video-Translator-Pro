@@ -11,10 +11,10 @@ class PackagedPathTests(unittest.TestCase):
              mock.patch.object(paths.sys, "executable", "/tmp/portable/Video-Translator-Pro.exe"):
             self.assertEqual(paths.get_program_dir(), Path("/tmp/portable").resolve())
 
-    def test_runtime_bin_dir_uses_meipass_when_frozen(self):
-        with mock.patch.object(paths.sys, "frozen", True, create=True), \
-             mock.patch.object(paths.sys, "_MEIPASS", "/tmp/_MEI123", create=True):
-            self.assertEqual(paths.get_runtime_bin_dir(), Path("/tmp/_MEI123").resolve())
+    def test_bundled_resource_dir_uses_module_location(self):
+        bundled = Path("/tmp/_MEI123")
+        with mock.patch.object(paths, "__file__", str(bundled / "videotranslator" / "core" / "paths.py")):
+            self.assertEqual(paths.get_bundled_resource_dir(), bundled.resolve())
 
 
 if __name__ == "__main__":

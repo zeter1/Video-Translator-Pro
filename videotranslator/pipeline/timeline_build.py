@@ -7,7 +7,7 @@ from videotranslator.core.compat_bridge import call_legacy_override
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import os
-from videotranslator.config import MIN_INSERTED_PAUSE, PAUSE_FINISH_MARGIN, TTS_CACHE_SCHEMA_VERSION, TTS_PREPARED_CACHE_SCHEMA_VERSION, TTS_PREPARE_WORKERS
+from videotranslator.config import MIN_INSERTED_PAUSE, PAUSE_FINISH_MARGIN, TTS_CACHE_SCHEMA_VERSION, TTS_FINAL_VOICE_REPAIR_MAX_SEGMENTS, TTS_PREPARED_CACHE_SCHEMA_VERSION, TTS_PREPARE_WORKERS
 from videotranslator.core.cancel import CancelledError
 from videotranslator.core.diagnostics import classify_exception, compact_exception, exception_chain
 from videotranslator.core.timefmt import fmt_time
@@ -78,6 +78,8 @@ class TimelineBuildMixin:
                 continue
             jobs.append((zero_index, i, seg, text, start, end, spoken_slot, target_slot, hard_slot))
 
+        jobs_by_index = {job[1]: job for job in jobs}
+
         self._problem(
             "tts_parallel_preparation_started",
             message="Начата параллельная подготовка сегментов озвучки.",
@@ -130,7 +132,6 @@ class TimelineBuildMixin:
 # CODEX-PHASE TL3A EDGE_RECOVERY — sequential selected-voice recovery for first-pass failures
         if preparation_failures:
             first_pass_failures = list(dict.fromkeys(preparation_failures))
-            jobs_by_index = {job[1]: job for job in jobs}
             first_failed_job = jobs_by_index[first_pass_failures[0]]
             decision = self._await_selected_voice_or_fallback(
                 first_failed_job[3],
@@ -302,7 +303,102 @@ class TimelineBuildMixin:
                 failed_indices=preparation_failures,
             )
 
-# CODEX-PHASE TL3C READY_TIMELINE — place prepared speech on timeline and derive pause deficits
+# CODEX-PHASE TL3C VOICE_CONSISTENCY_REPAIR — best-effort replacement of final gTTS audio
+        with self.tts_stats_lock:
+            final_gtts_indices = sorted(self.tts_gtts_segments)
+        if final_gtts_indices and not preparation_failures:
+            repair_candidates = final_gtts_indices[:TTS_FINAL_VOICE_REPAIR_MAX_SEGMENTS]
+            first_index = repair_candidates[0]
+            first_job = jobs_by_index.get(first_index)
+            probe_ok = False
+            if first_job is not None:
+                self.log(
+                    f"   🎙️ Проверяю Edge TTS перед выравниванием тембра "
+                    f"({len(final_gtts_indices)} резервных gTTS-фраз)..."
+                )
+                probe_ok = self._probe_edge_voice_once(first_job[3], voice, first_index)
+
+            repaired_to_edge = 0
+            attempted_repairs = 0
+            repair_stopped_reason = "probe_failed" if not probe_ok else ""
+            if probe_ok:
+                previous_fallback_allowed = self._tts_allow_gtts_fallback
+                self._tts_allow_gtts_fallback = False
+                self._problem(
+                    "tts_voice_consistency_repair_started",
+                    message="Edge TTS восстановился; начата финальная замена резервных gTTS-фраз выбранным голосом.",
+                    candidates_total=len(final_gtts_indices),
+                    candidates_limited=len(repair_candidates),
+                    voice=voice,
+                )
+                try:
+                    for repair_no, index in enumerate(repair_candidates, 1):
+                        self._check_cancel()
+                        job = jobs_by_index.get(index)
+                        if job is None:
+                            continue
+                        _zero_index, i, _seg, text, _start, _end, _spoken_slot, target_slot, hard_slot = job
+                        attempted_repairs += 1
+                        self.set_progress(84, f"Выравнивание голоса {repair_no}/{len(repair_candidates)} (сегмент {i})...")
+                        try:
+                            final_path, tts_dur, stats = self._prepare_tts_segment(
+                                text, voice, i, target_slot, hard_slot
+                            )
+                        except CancelledError:
+                            raise
+                        except Exception as exc:
+                            repair_stopped_reason = "segment_exception"
+                            self._problem(
+                                "tts_voice_consistency_repair_segment_failed",
+                                level="warning",
+                                message="Финальная замена gTTS-фразы выбранным голосом завершилась исключением; дальнейший repair-pass остановлен.",
+                                tts_segment_index=i,
+                                repair_attempt=repair_no,
+                                exception={
+                                    "type": type(exc).__name__,
+                                    "category": classify_exception(exc),
+                                    "message": compact_exception(exc, max_len=1000),
+                                    "chain": exception_chain(exc),
+                                },
+                            )
+                            break
+                        if final_path and stats.get("source_provider") == "edge_tts":
+                            prepared[i] = (final_path, tts_dur, stats)
+                            repaired_to_edge += 1
+                            self._increment_tts_stat("gtts_repaired_to_edge")
+                            continue
+                        repair_stopped_reason = "edge_unavailable_during_repair"
+                        break
+                finally:
+                    self._tts_allow_gtts_fallback = previous_fallback_allowed
+                    self._finish_edge_voice_preservation(reason="final_voice_repair_finished")
+
+            with self.tts_stats_lock:
+                remaining_gtts = len(self.tts_gtts_segments)
+                self.tts_stats["voice_repair_probe_success"] = bool(probe_ok)
+                self.tts_stats["voice_repair_attempted"] = attempted_repairs
+                self.tts_stats["voice_repair_remaining_gtts"] = remaining_gtts
+            if repaired_to_edge:
+                self.log(
+                    f"   ✅ Тембр выровнен: {repaired_to_edge} резервных фраз заменено "
+                    f"на {voice}; осталось gTTS: {remaining_gtts}."
+                )
+            elif not probe_ok:
+                self.log("   ℹ️ Edge TTS всё ещё нестабилен; дополнительное ожидание не добавляю, сохраняю готовую озвучку.")
+            self._problem(
+                "tts_voice_consistency_repair_finished",
+                level="warning" if remaining_gtts else "info",
+                message="Финальная проверка однородности голоса завершена.",
+                probe_success=bool(probe_ok),
+                candidates_total=len(final_gtts_indices),
+                attempted=attempted_repairs,
+                repaired_to_edge=repaired_to_edge,
+                remaining_gtts=remaining_gtts,
+                stopped_reason=repair_stopped_reason,
+                voice=voice,
+            )
+
+# CODEX-PHASE TL3D READY_TIMELINE — place prepared speech on timeline and derive pause deficits
         for job in jobs:
             zero_index, i, seg, _text, start, end, spoken_slot, _target_slot, hard_slot = job
             final_path, tts_dur, stats = prepared.get(i, (None, 0.0, {}))
@@ -347,7 +443,7 @@ class TimelineBuildMixin:
                 f"speed≤x{stats.get('total_speed', 1.0):.2f}{details_text}"
             )
 
-# CODEX-PHASE TL3D TTS_SUMMARY — publish provider/cache/recovery outcome and enforce completeness
+# CODEX-PHASE TL3E TTS_SUMMARY — publish provider/cache/recovery outcome and enforce completeness
         with self.tts_stats_lock:
             self.tts_stats["selected_voice"] = voice
             self.tts_stats["gtts_fallback_reason"] = self._tts_fallback_reason
@@ -400,15 +496,42 @@ class TimelineBuildMixin:
 # CODEX-PHASE TL4 PAUSE_PLAN — validate/merge stop-frame insertions
         pause_count_before = len(sanitize_pause_plan(pause_plan, video_dur))
         pause_plan = merge_nearby_pause_plan(pause_plan, video_dur, segments)
+        total_pause_sec = sum(float(item.get("duration", 0.0)) for item in pause_plan)
         self._problem(
             "pause_plan_optimized",
             message="Близкие стоп-кадры безопасно объединены внутри естественных промежутков.",
             before=pause_count_before,
             after=len(pause_plan),
             merged=max(0, pause_count_before - len(pause_plan)),
-            total_pause_sec=round(sum(float(item.get("duration", 0.0)) for item in pause_plan), 3),
+            total_pause_sec=round(total_pause_sec, 3),
         )
-        final_dur = float(video_dur) + sum(float(p.get("duration", 0.0)) for p in pause_plan)
+        severe_pauses = sorted(
+            (item for item in pause_plan if float(item.get("duration", 0.0)) >= 2.0),
+            key=lambda item: float(item.get("duration", 0.0)),
+            reverse=True,
+        )
+        top_pause_segments = [
+            {
+                "segments": list(item.get("segments") or []),
+                "at_sec": round(float(item.get("at", 0.0)), 3),
+                "duration_sec": round(float(item.get("duration", 0.0)), 3),
+            }
+            for item in severe_pauses[:10]
+        ]
+        pause_ratio = (total_pause_sec / float(video_dur)) if float(video_dur) > 0 else 0.0
+        self._problem(
+            "pause_sync_quality_summary",
+            message="Сводка качества Pause Sync: объём добавленных стоп-кадров и самые длинные дефициты речи.",
+            pause_count=len(pause_plan),
+            total_pause_sec=round(total_pause_sec, 3),
+            source_video_duration_sec=round(float(video_dur), 3),
+            pause_ratio=round(pause_ratio, 5),
+            severe_pause_count=len(severe_pauses),
+            max_pause_sec=round(max((float(item.get("duration", 0.0)) for item in pause_plan), default=0.0), 3),
+            top_pause_segments=top_pause_segments,
+            speed_limit=self.speech_speed_limit,
+        )
+        final_dur = float(video_dur) + total_pause_sec
         if pause_plan:
             self.log(f"   ⏸️ Будет добавлено стоп-кадров: {len(pause_plan)}, новая длительность: {fmt_time(final_dur)}")
 

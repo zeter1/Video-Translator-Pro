@@ -6,6 +6,7 @@ from videotranslator.config import TRANSLATION_BATCH_MAX_CHARS
 from videotranslator.core.cancel import CancelledError
 from videotranslator.pipeline.translation import TranslationMixin
 from videotranslator.translation.batching import split_translation_text
+from videotranslator.translation.quality import inspect_translation_response
 
 
 class LongTranslationTests(unittest.TestCase):
@@ -25,6 +26,38 @@ class LongTranslationTests(unittest.TestCase):
         self.assertEqual(translator.translate_segment(text, attempts=2), 'начало конец')
         self.assertEqual([c.args[0][0] for c in client.translate.call_args_list], ['a', 'z', 'z'])
         self.assertEqual(translator._sleep_or_cancel.call_count, 1)
+
+
+    def test_provider_server_error_text_is_rejected_and_retried(self):
+        server_error = (
+            "Error 500 (Server Error)!!1500.That’s an error."
+            "There was an error. Please try again later.That’s all we know."
+        )
+        translator, client = self.make_translator(None)
+        client.translate.side_effect = [server_error, "Нормальный перевод"]
+        translator.translation_network_guard.record_failure.return_value = True
+
+        result = translator.translate_segment("Hello world", index=12, attempts=2)
+
+        self.assertEqual(result, "Нормальный перевод")
+        self.assertEqual(client.translate.call_count, 2)
+        problem_events = [call.args[0] for call in translator._problem.call_args_list]
+        self.assertIn("translation_provider_response_rejected", problem_events)
+        self.assertIn("translation_retry_recovered", problem_events)
+        translator.translation_network_guard.record_failure.assert_called_once()
+
+    def test_provider_html_error_page_is_rejected(self):
+        inspection = inspect_translation_response(
+            "<html><title>503 Service Unavailable</title><body>Bad Gateway</body></html>",
+            source_text="Normal sentence",
+        )
+        self.assertFalse(inspection["valid"])
+        self.assertEqual(inspection["reason"], "provider_html_error_page")
+
+    def test_real_source_about_error_500_is_not_false_positive(self):
+        text = "Error 500 (Server Error). There was an error. Please try again later."
+        inspection = inspect_translation_response(text, source_text=text)
+        self.assertTrue(inspection["valid"])
 
     def make_translator(self, translate):
         translator = TranslationMixin()

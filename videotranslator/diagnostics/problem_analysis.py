@@ -104,8 +104,11 @@ class ProblemAnalysisMixin:
         context = {
             key: details.get(key)
             for key in (
-                "service", "operation", "provider", "returncode", "return_code", "file_index", "files_total",
+                "service", "operation", "provider", "provider_from", "provider_to", "primary_backend", "fallback_backend", "endpoint", "returncode", "return_code", "file_index", "files_total",
                 "segment_index", "tts_segment_index", "attempt", "attempts_total", "max_attempts",
+                "failure_kind", "impact", "recovery_action", "checkpoint_path",
+                "source_length", "source_sha256", "source_preview",
+                "invalid_count", "rejected_checkpoint_entries",
                 "elapsed_sec", "timeout_sec", "ffmpeg_completed_ok",
                 "expected_video_duration_sec", "expected_audio_duration_sec",
                 "source_video_fps", "pause_count", "raw_pause_total_sec",
@@ -128,6 +131,19 @@ class ProblemAnalysisMixin:
                 "checks": validation.get("checks") or [],
                 "timing": validation.get("timing") or {},
             }
+        response_validation = details.get("response_validation") if isinstance(details.get("response_validation"), dict) else {}
+        if response_validation:
+            context["response_validation"] = {
+                "valid": response_validation.get("valid"),
+                "reason": response_validation.get("reason") or "",
+                "signals": response_validation.get("signals") or [],
+                "response_length": response_validation.get("response_length"),
+                "response_sha256": response_validation.get("response_sha256") or "",
+                "preview": redact_diagnostic_text(response_validation.get("preview") or "", max_len=500),
+            }
+        invalid_samples = details.get("invalid_samples")
+        if isinstance(invalid_samples, list) and invalid_samples:
+            context["invalid_samples"] = invalid_samples[:5]
         return context
 
 
@@ -140,6 +156,12 @@ class ProblemAnalysisMixin:
                 "recommended_fix": "Проверить ограниченные повторы, тайм-ауты, паузу шторма и продолжение из контрольной точки; не ослаблять проверку успешного ответа.",
                 "verification": "Повторить тот же файл: серия должна либо восстановиться, либо завершиться одной ясной terminal error с сохранённым прогрессом.",
             },
+            "translation_rate_limit": {
+                "likely_cause": "Google Translate временно ограничил IP/маршрут (429/TooManyRequests) либо endpoint стал недоступен; это внешняя квота/антибот, а не ошибка TTS.",
+                "code_search": ["TranslationMixin.translate_records_batch", "translation_provider_circuit_opened", "translation_provider_probe_failed", "ReusableGoogleTranslator"],
+                "recommended_fix": "Сначала переключить Google endpoint (JSON GTX ↔ mobile/deep-translator) и продолжить на здоровом маршруте. Только если оба endpoint недоступны: не делать поштучный fan-out, использовать pacer, cooldown, один probe, checkpoint и раннее безопасное завершение.",
+                "verification": "Подменить основной endpoint TooManyRequests и убедиться, что тот же сегмент завершается через резервный endpoint без 60-секундного cooldown. Затем отключить оба endpoint: число реальных запросов остаётся ограниченным, остальные сегменты откладываются без fan-out.",
+            },
             "media_validation": {
                 "likely_cause": "FFmpeg мог завершиться успешно, но фактические A/V-потоки не совпали с ожидаемой временной моделью или файл потерял поток.",
                 "code_search": ["validate_output_media", "probe_media_timing", "assemble_final_video", "video_output_validation_failed"],
@@ -151,6 +173,12 @@ class ProblemAnalysisMixin:
                 "code_search": ["VideoTranslator.process", "VideoTranslatorApp._on_close", "save_batch_recovery_state"],
                 "recommended_fix": "Не исправлять как ошибку без признаков самопроизвольной отмены; проверить контрольную точку и отсутствие принятого неполного результата.",
                 "verification": "Отменить обработку вручную и убедиться, что исходник сохранён, а незавершённый пакет предлагается продолжить.",
+            },
+            "translation_provider_response": {
+                "likely_cause": "Провайдер перевода вернул HTTP/HTML страницу ошибки, блокировки или rate-limit как обычный текст; старая версия принимала её за перевод.",
+                "code_search": ["inspect_translation_response", "ensure_valid_translation_response", "TranslationMixin.translate_segment", "translation_checkpoint_entry_rejected"],
+                "recommended_fix": "Не принимать непроверенный текст провайдера: отклонять error/block pages до checkpoint/TTS, учитывать это как сетевой сбой, повторять ограниченно и очищать старые повреждённые checkpoint-записи.",
+                "verification": "Подменить провайдера строкой Error 500/HTML/429: она должна быть отклонена, повторена и никогда не попасть в translated/checkpoint/TTS; обычный перевод должен пройти.",
             },
             "translation_tts": {
                 "likely_cause": "Сбой внешнего сервиса перевода/озвучки либо некорректный ответ для конкретного сегмента.",
@@ -237,7 +265,19 @@ class ProblemAnalysisMixin:
             "cause_status": "likely_not_proven",
             "do_not_assume": "Предположение становится подтверждённой причиной только после проверки evidence и соседних событий.",
         }
-        if family in {"network", "network_timeout", "network_connection", "rate_limit", "timeout"}:
+        if event in {"translation_provider_response_rejected", "translation_checkpoint_entry_rejected", "translation_integrity_invalid_provider_response"} or family == "translation_provider_response":
+            card["playbook"] = "translation_provider_response"
+            card["cause_status"] = "confirmed_invalid_provider_payload"
+        elif event in {
+            "translation_rate_limit_detected",
+            "translation_batch_deferred_provider_unavailable",
+            "translation_provider_circuit_opened",
+            "translation_provider_probe_failed",
+        } or (family == "rate_limit" and str(problem.get("stage") or "") == "translation"):
+            card["playbook"] = "translation_rate_limit"
+            if event == "translation_provider_probe_failed":
+                card["cause_status"] = "confirmed_provider_unavailable_after_cooldown"
+        elif family in {"network", "network_timeout", "network_connection", "rate_limit", "timeout"}:
             card["playbook"] = "network_retry"
         elif event == "file_pipeline_cancelled":
             card["playbook"] = "user_cancel"
@@ -293,10 +333,53 @@ class ProblemAnalysisMixin:
         previous = self._summary.get("previous_session") or {}
         if previous.get("status") == "interrupted":
             observations.append("Подтверждено незавершённое закрытие предыдущей сессии.")
+        tts_voice = self._summary.get("tts_voice") or {}
+        final_gtts_segments = int(tts_voice.get("gtts_segments") or 0)
+        pause_sync = self._summary.get("pause_sync") or {}
+        pause_ratio = float(pause_sync.get("pause_ratio") or 0.0)
+        if final_gtts_segments:
+            observations.append(
+                f"Финальная озвучка содержит {final_gtts_segments} сегм. резервного gTTS; "
+                "тембр части фраз может отличаться от выбранного голоса."
+            )
+        if pause_ratio >= 0.05:
+            observations.append(
+                f"Pause Sync добавил {float(pause_sync.get('total_pause_sec') or 0.0):.1f}с "
+                f"({pause_ratio * 100:.1f}% длительности исходного видео); длинных пауз ≥2с: "
+                f"{int(pause_sync.get('severe_pause_count') or 0)}."
+            )
         if not observations:
             observations.append("На текущем этапе предупреждения и ошибки не зарегистрированы.")
 
         program_improvements = []
+        if categories & {"translation_provider_response"} or any(
+            item.get("event") in {"translation_provider_response_rejected", "translation_checkpoint_entry_rejected", "translation_integrity_invalid_provider_response"}
+            for item in problems
+        ):
+            program_improvements.append({
+                "priority": "high",
+                "area": "translation_response_validation",
+                "proposal": "Сохранять строгий барьер provider response → checkpoint → TTS: error/HTML/block page не является переводом, должна повторяться как ошибка и очищаться из старого кэша.",
+                "basis": "Лог содержит подтверждённый отклонённый ответ провайдера перевода или повреждённую checkpoint-запись.",
+            })
+        if pause_ratio >= 0.05:
+            program_improvements.append({
+                "priority": "medium",
+                "area": "pause_sync_quality",
+                "proposal": "Проверить самые длинные Pause Sync-дефициты: для них полезнее сокращать формулировку перевода/ручную коррекцию или осознанно поднять лимит скорости, чем ускорять все фразы подряд.",
+                "basis": (
+                    f"Стоп-кадры добавили {float(pause_sync.get('total_pause_sec') or 0.0):.1f}с "
+                    f"({pause_ratio * 100:.1f}% исходной длительности); "
+                    f"пауз ≥2с: {int(pause_sync.get('severe_pause_count') or 0)}."
+                ),
+            })
+        if final_gtts_segments:
+            program_improvements.append({
+                "priority": "medium",
+                "area": "tts_voice_consistency",
+                "proposal": "После восстановления Edge TTS выполнить ограниченный финальный repair-pass и заменить резервные gTTS-фразы выбранным голосом; если probe не прошёл — не задерживать готовый результат.",
+                "basis": f"В финальной озвучке осталось {final_gtts_segments} сегм. gTTS по tts_summary.",
+            })
         if categories & {"network", "network_timeout", "connection", "text_to_speech"}:
             program_improvements.append({
                 "priority": "high" if errors else "medium",
@@ -388,8 +471,15 @@ class ProblemAnalysisMixin:
             "remediation_playbooks": self._remediation_playbooks(),
             "program_improvement_candidates": program_improvements,
             "logging_improvement_candidates": logging_improvements,
+            "ai_debug_contract": {
+                "goal": "Определить подтверждённый симптом, первую первопричину, влияние, автоматическое восстановление, место исправления и регрессионную проверку без чтения всего проекта.",
+                "problem_identity_fields": ["event", "diagnostic.signature", "diagnostic.family", "details.stage", "details.input_path"],
+                "root_cause_evidence_fields": ["details.exception", "details.response_validation", "details.validation", "details.stderr_tail", "details.return_code"],
+                "recovery_fields": ["diagnostic.impact", "diagnostic.recovery_action", "details.attempt", "details.attempts_total", "details.checkpoint_path"],
+                "rule": "Не считать текст успешным ответом внешнего сервиса только потому, что вызов вернул строку; сначала проверить semantic response validation.",
+            },
             "recommended_reading_order": [
-                "report.md", "summary.json", "problems.jsonl", "events.jsonl"
+                "report.md", "summary.json -> codex_analysis.issue_cards", "problems.jsonl", "events.jsonl"
             ],
             "next_checks": [
                 "Сопоставить первую проблему с предыдущими 10–30 событиями в events.jsonl.",

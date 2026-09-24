@@ -14,14 +14,49 @@ class UILayoutMixin:
     def _build_ui(self):
         style = ttk.Style()
         style.theme_use("clam")
-        style.configure("Start.TButton", font=("Arial", 11, "bold"), foreground="white", background="#1b5e20")
+        style.configure("Start.TButton", font=("Arial", 13, "bold"), foreground="white", background="#1b5e20")
         style.map("Start.TButton", background=[("disabled", "#888"), ("active", "#2e7d32")])
         style.configure("Cancel.TButton", foreground="white", background="#b71c1c")
         style.map("Cancel.TButton", background=[("disabled", "#888"), ("active", "#c62828")])
 
         pad = dict(padx=10, pady=4)
 
-        files_frame = ttk.LabelFrame(self.root, text="1. Видеофайлы", padding=8)
+        # Separate the main workflow from the runtime AI catalog.  The second
+        # tab can manage large local models without cluttering the translation form.
+        self.notebook = ttk.Notebook(self.root)
+        self.notebook.pack(fill="both", expand=True)
+        main_tab = ttk.Frame(self.notebook)
+        self.tasks_tab = ttk.Frame(self.notebook)
+        self.log_tab = ttk.Frame(self.notebook)
+        models_tab = ttk.Frame(self.notebook)
+        self.notebook.add(main_tab, text="Перевод видео")
+        self.notebook.add(self.tasks_tab, text="Задачи")
+        self.notebook.add(self.log_tab, text="Журнал")
+        self.notebook.add(models_tab, text="Переводчики и голоса")
+        self._build_tasks_panel(self.tasks_tab)
+
+        # Reserve the primary action bar before packing the long form. Pack's
+        # geometry algorithm then keeps this bar visible at the bottom even when the
+        # settings form is taller than the current window.
+        action_frame = ttk.LabelFrame(main_tab, text="Запуск", padding=8)
+        action_frame.pack(side="bottom", fill="x", padx=10, pady=8)
+        self.btn_start = ttk.Button(
+            action_frame,
+            text="▶  НАЧАТЬ ОБРАБОТКУ",
+            style="Start.TButton",
+            command=self.start,
+        )
+        self.btn_start.pack(side="left", fill="x", expand=True, ipady=12, padx=(0, 8))
+        self.btn_cancel = ttk.Button(
+            action_frame,
+            text="⏹ Отмена",
+            style="Cancel.TButton",
+            command=self.cancel,
+            state="disabled",
+        )
+        self.btn_cancel.pack(side="left", ipady=12, ipadx=18)
+
+        files_frame = ttk.LabelFrame(main_tab, text="1. Видеофайлы", padding=8)
         files_frame.pack(fill="both", expand=False, **pad)
 
         buttons_frame = ttk.Frame(files_frame)
@@ -49,7 +84,22 @@ class UILayoutMixin:
         self.listbox.pack(side="left", fill="both", expand=True)
         scrollbar.config(command=self.listbox.yview)
 
-        recog_frame = ttk.LabelFrame(self.root, text="2. Язык, распознавание и голос", padding=8)
+        output_frame = ttk.Frame(files_frame)
+        output_frame.pack(fill="x", pady=(7, 0))
+        ttk.Label(output_frame, text="Папка для готовых видео:").pack(side="left")
+        self.var_output_dir = tk.StringVar(value="")
+        self.entry_output_dir = ttk.Entry(output_frame, textvariable=self.var_output_dir, state="readonly")
+        self.entry_output_dir.pack(side="left", fill="x", expand=True, padx=(8, 6))
+        self.btn_output_dir = ttk.Button(output_frame, text="📁 Выбрать…", command=self._choose_output_folder)
+        self.btn_output_dir.pack(side="left")
+        ttk.Label(
+            files_frame,
+            text="Готовые MP4 сохраняются в эту папку; исходные видео не перезаписываются.",
+            foreground="#666",
+            font=("Arial", 8),
+        ).pack(fill="x", pady=(3, 0))
+
+        recog_frame = ttk.LabelFrame(main_tab, text="2. Язык, распознавание и голос", padding=8)
         recog_frame.pack(fill="x", **pad)
         recog_frame.columnconfigure(1, weight=1)
 
@@ -80,7 +130,7 @@ class UILayoutMixin:
         )
         self.chk_review.grid(row=3, column=0, columnspan=2, sticky="w", pady=(5, 0))
 
-        audio_frame = ttk.LabelFrame(self.root, text="3. Настройки аудио", padding=8)
+        audio_frame = ttk.LabelFrame(main_tab, text="3. Настройки аудио", padding=8)
         audio_frame.pack(fill="x", **pad)
         self.var_keep = tk.BooleanVar(value=False)
         self.chk_keep = ttk.Checkbutton(
@@ -189,47 +239,41 @@ class UILayoutMixin:
         self.combo_speed.bind("<<ComboboxSelected>>", lambda _event: self.save_settings())
         ttk.Label(speed_frame, text="x (выше — меньше стоп-кадров)", foreground="#666").pack(side="left")
 
+        self._build_ai_models_panel(models_tab)
+
         ttk.Label(
-            self.root,
+            main_tab,
             text="ℹ️ Фразы переводятся, озвучиваются и вставляются по таймкодам оригинала",
             foreground="#1565c0",
             font=("Arial", 8),
         ).pack(padx=10, anchor="w")
 
-        progress_frame = ttk.LabelFrame(self.root, text="Прогресс", padding=6)
+        progress_frame = ttk.LabelFrame(main_tab, text="Прогресс", padding=6)
         progress_frame.pack(fill="x", **pad)
         self.var_prog = tk.IntVar(value=0)
         ttk.Progressbar(progress_frame, variable=self.var_prog, maximum=100).pack(fill="x", pady=(0, 3))
         self.lbl_status = ttk.Label(progress_frame, text="Ожидание...", foreground="#555", font=("Arial", 9))
         self.lbl_status.pack(anchor="w")
 
-        log_frame = ttk.LabelFrame(self.root, text="Журнал", padding=6)
-        log_frame.pack(fill="both", expand=True, **pad)
+        # The journal owns its own tab so it can grow freely without pushing the
+        # primary Start action below the visible part of the translation form.
+        log_header = ttk.Frame(self.log_tab, padding=(10, 10, 10, 4))
+        log_header.pack(fill="x")
+        ttk.Label(log_header, text="Журнал выполнения", font=("Arial", 12, "bold")).pack(side="left")
+        self.btn_clear_log = ttk.Button(log_header, text="Очистить журнал", command=self._clear_log)
+        self.btn_clear_log.pack(side="right")
+        ttk.Label(
+            self.log_tab,
+            text="Текущие сообщения программы. Подробные диагностические файлы продолжают сохраняться на диск.",
+            foreground="#666",
+            padding=(10, 0, 10, 6),
+        ).pack(fill="x")
+        log_frame = ttk.Frame(self.log_tab, padding=(10, 0, 10, 10))
+        log_frame.pack(fill="both", expand=True)
         self.txt_log = scrolledtext.ScrolledText(
             log_frame,
-            height=11,
             state="disabled",
-            font=("Consolas", 8),
+            font=("Consolas", 9),
             wrap="word",
         )
         self.txt_log.pack(fill="both", expand=True)
-        self.btn_clear_log = ttk.Button(log_frame, text="Очистить журнал", command=self._clear_log)
-        self.btn_clear_log.pack(anchor="e", pady=(2, 0))
-
-        bottom_frame = ttk.Frame(self.root)
-        bottom_frame.pack(fill="x", padx=10, pady=8)
-        self.btn_start = ttk.Button(
-            bottom_frame,
-            text="▶  НАЧАТЬ ОБРАБОТКУ",
-            style="Start.TButton",
-            command=self.start,
-        )
-        self.btn_start.pack(side="left", fill="x", expand=True, ipady=10, padx=(0, 5))
-        self.btn_cancel = ttk.Button(
-            bottom_frame,
-            text="⏹ Отмена",
-            style="Cancel.TButton",
-            command=self.cancel,
-            state="disabled",
-        )
-        self.btn_cancel.pack(side="left", ipady=10, ipadx=14)

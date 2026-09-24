@@ -7,23 +7,34 @@ import os
 import shutil
 import subprocess
 import time
-from videotranslator.core.paths import get_program_dir
+from videotranslator.core.paths import get_bundled_resource_dir, get_program_dir
 from videotranslator.core.cancel import CancelledError
 from videotranslator.core.diagnostics import redact_diagnostic_text
+from videotranslator.core.process_flags import no_console_creationflags
 from videotranslator.core.timefmt import fmt_time
 
 
 def find_ffmpeg() -> str:
+    # Prefer the exact binary bundled with the artifact, then an external
+    # portable pair next to the launcher.  PyInstaller 6 ONEDIR may place
+    # bundled data under _internal and ONEFILE extracts it under _MEIPASS, so
+    # bundled resources are resolved from __file__, not sys.executable.
+    resource_dirs = [get_bundled_resource_dir(), get_program_dir()]
+    seen = set()
+    for directory in resource_dirs:
+        key = os.path.normcase(os.path.abspath(str(directory)))
+        if key in seen:
+            continue
+        seen.add(key)
+        for name in ("ffmpeg.exe", "ffmpeg"):
+            path = Path(directory) / name
+            if path.is_file():
+                return str(path)
+
     for candidate in ("ffmpeg", "ffmpeg.exe"):
         path = shutil.which(candidate)
         if path:
             return path
-
-    script_dir = get_program_dir()
-    for name in ("ffmpeg.exe", "ffmpeg"):
-        path = script_dir / name
-        if path.exists():
-            return str(path)
 
     raise RuntimeError(
         "ffmpeg не найден!\n"
@@ -80,6 +91,7 @@ def run_subprocess(cmd: list, timeout: int, log=None, cancel_event=None,
                 text=True,
                 errors="replace",
                 timeout=timeout,
+                creationflags=no_console_creationflags(),
             )
             log_subprocess_result(result, cmd, log=log)
             return result
@@ -91,6 +103,7 @@ def run_subprocess(cmd: list, timeout: int, log=None, cancel_event=None,
             stderr=subprocess.PIPE,
             text=True,
             errors="replace",
+            creationflags=no_console_creationflags(),
         )
         last_heartbeat_at = started_at
 

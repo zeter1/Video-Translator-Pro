@@ -14,6 +14,7 @@ from tkinter import ttk
 from videotranslator.config import DEFAULT_TARGET_LANGUAGE, get_target_language
 from videotranslator.core.diagnostics import safe_log_filename
 from videotranslator.core.paths import get_translated_texts_dir
+from videotranslator.core.io import atomic_write_text
 from videotranslator.core.timefmt import fmt_time
 
 class UIReviewWindowMixin:
@@ -200,8 +201,7 @@ class UIReviewWindowMixin:
             )
             if not path:
                 return ""
-            with open(path, "w", encoding="utf-8") as file:
-                file.write(text)
+            atomic_write_text(Path(path), text)
             messagebox.showinfo("TXT сохранён", path, parent=parent_window)
             return path
 

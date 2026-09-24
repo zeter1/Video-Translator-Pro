@@ -13,7 +13,7 @@ import tempfile
 from videotranslator.config import HEAVY_PAUSE_SYNC_COUNT, SAMPLE_RATE
 from videotranslator.core.cancel import CancelledError
 from videotranslator.core.diagnostics import compact_exception
-from videotranslator.media.audio import calc_final_encode_timeout, final_video_encoder_attempts
+from videotranslator.media.audio import build_original_voice_mix_tail, calc_final_encode_timeout, ffmpeg_has_filter, final_video_encoder_attempts
 from videotranslator.media.process import run_subprocess as _legacy_run_subprocess
 from videotranslator.sync.pause import make_filter_script_for_pauses, sanitize_pause_plan
 
@@ -110,15 +110,37 @@ def assemble_final_video(ffmpeg: str, ffprobe: str, input_video: str, russian_au
     effective_video_pause, effective_pause_frames = _quantize_pause_total_to_video_frames(
         pause_plan, source_video_fps
     )
+    severe_source_video_truncation = False
+    source_video_gap = None
     if source_video_duration is not None:
         source_video_duration = max(0.0, min(float(source_video_duration), float(video_dur)))
+        source_video_gap = max(0.0, float(video_dur) - source_video_duration)
+        # A small source A/V tail skew is common and is handled by separate stream
+        # expectations.  A video stream that ends far earlier than the media timeline
+        # is different: publishing it would leave most of the translated audio with
+        # no real video frames. Reject that severe corruption instead of calling it a
+        # successful translation.
+        if float(video_dur) > 0:
+            severe_source_video_truncation = (
+                source_video_gap > 1.0
+                and source_video_duration < float(video_dur) * 0.80
+            )
         # Pause Sync uses FFmpeg tpad once per pause. tpad rounds every duration to an
         # integer frame count, so the encoded video is intentionally shorter/longer than
         # the raw floating-point pause sum by up to half a frame per pause.
-        expected_video_duration = source_video_duration + effective_video_pause
+        uncapped_expected_video_duration = source_video_duration + effective_video_pause
     else:
-        expected_video_duration = final_dur
-    expected_audio_duration = final_dur
+        uncapped_expected_video_duration = final_dur
+
+    # Both Pause Sync and ordinary final assembly pass ``-t final_dur`` to FFmpeg.
+    # Therefore a video timeline that is slightly longer than the translated-audio
+    # timeline is intentionally clipped at that mux boundary.  Validating against the
+    # pre-``-t`` duration causes a false ``video_duration_mismatch`` and makes the
+    # program discard a perfectly usable MP4 (the 2026-09-13 failure was +0.310 s).
+    output_duration_limit = max(0.0, float(final_dur))
+    expected_video_duration = min(uncapped_expected_video_duration, output_duration_limit)
+    expected_audio_duration = output_duration_limit
+    video_duration_cap_applied = uncapped_expected_video_duration > output_duration_limit + 1e-6
 
     def diag(event: str, level: str = "info", message: str = "", **details):
         if diagnostic:
@@ -126,6 +148,48 @@ def assemble_final_video(ffmpeg: str, ffprobe: str, input_video: str, russian_au
                 diagnostic(event, level=level, message=message, **details)
             except Exception:
                 pass
+
+    duck_original = bool(
+        keep_original
+        and float(orig_vol_pct or 0) > 0
+        and ffmpeg_has_filter(ffmpeg, "sidechaincompress", log=log)
+    )
+    if keep_original:
+        mix_mode = "adaptive_ducking" if duck_original else "fixed_background_mix"
+        diag(
+            "original_audio_mix_mode",
+            message=(
+                "Оригинальная дорожка будет автоматически приглушаться под перевод."
+                if duck_original
+                else "Используется совместимое смешивание с постоянной громкостью оригинала."
+            ),
+            mode=mix_mode,
+            original_volume_pct=int(orig_vol_pct),
+            sidechaincompress_available=duck_original,
+        )
+        if log:
+            if duck_original:
+                log("   🎚️ Фон: адаптивное приглушение оригинала во время переведённой речи")
+            elif float(orig_vol_pct or 0) > 0:
+                log("   ℹ️ FFmpeg без sidechaincompress: фон смешивается с постоянной громкостью")
+
+    if severe_source_video_truncation:
+        diag(
+            "source_video_stream_truncated",
+            level="error",
+            message="Видеопоток исходника заканчивается значительно раньше общей длительности медиа.",
+            source_video_duration_sec=round(float(source_video_duration or 0.0), 3),
+            media_duration_sec=round(float(video_dur), 3),
+            missing_video_tail_sec=round(float(source_video_gap or 0.0), 3),
+            impact="final_video_not_published",
+            recovery_action="check_or_remux_source_video",
+        )
+        raise RuntimeError(
+            "Исходный видеопоток обрывается слишком рано: "
+            f"video={float(source_video_duration or 0.0):.2f}с, media={float(video_dur):.2f}с. "
+            "Чтобы не создавать итоговый файл с длинным участком без видеокадров, сборка остановлена. "
+            "Проверьте исходник или предварительно перемультиплексируйте/исправьте его."
+        )
 
     def remove_if_exists(path: str):
         if path and os.path.exists(path):
@@ -204,9 +268,19 @@ def assemble_final_video(ffmpeg: str, ffprobe: str, input_video: str, russian_au
         effective_video_pause_sec=round(effective_video_pause, 3),
         effective_pause_frames=effective_pause_frames,
         pause_frame_quantization_delta_sec=round(effective_video_pause - total_pause, 3),
+        uncapped_expected_video_duration_sec=round(uncapped_expected_video_duration, 3),
+        output_duration_limit_sec=round(output_duration_limit, 3),
+        video_duration_cap_applied=video_duration_cap_applied,
         expected_video_duration_sec=round(expected_video_duration, 3),
         expected_audio_duration_sec=round(expected_audio_duration, 3),
     )
+    if log and video_duration_cap_applied:
+        log(
+            "   ℹ️ Финальная команда FFmpeg ограничена -t: "
+            f"ожидание video {uncapped_expected_video_duration:.3f}с → {expected_video_duration:.3f}с "
+            f"по длительности итоговой аудиодорожки {output_duration_limit:.3f}с."
+        )
+
     if log and effective_pause_frames is not None and abs(effective_video_pause - total_pause) > 0.04:
         log(
             "   ℹ️ Pause Sync учитывает кадровое округление FFmpeg: "
@@ -258,8 +332,11 @@ def assemble_final_video(ffmpeg: str, ffprobe: str, input_video: str, russian_au
             if len(pause_plan) >= HEAVY_PAUSE_SYNC_COUNT:
                 log("      ℹ️ Много стоп-кадров: включён ускоренный режим финального кодирования")
 
-        filter_script = make_filter_script_for_pauses(temp_dir, pause_plan, video_dur, final_dur, keep_original, orig_vol_pct,
-                                                     audio_stream_index=audio_stream_index)
+        filter_script = make_filter_script_for_pauses(
+            temp_dir, pause_plan, video_dur, final_dur, keep_original, orig_vol_pct,
+            audio_stream_index=audio_stream_index, duck_original=duck_original,
+            video_fps=source_video_fps,
+        )
         duration_args = ["-t", f"{final_dur:.3f}"]
         base_cmd = [
             ffmpeg, "-y",
@@ -393,8 +470,9 @@ def assemble_final_video(ffmpeg: str, ffprobe: str, input_video: str, russian_au
             f"aresample={SAMPLE_RATE}:first_pts=0,aformat=sample_fmts=fltp:channel_layouts=stereo[orig];"
             f"[1:a]aresample={SAMPLE_RATE},aformat=sample_fmts=fltp:channel_layouts=stereo,"
             f"alimiter=limit=0.95[ru];"
-            f"[orig][ru]amix=inputs=2:duration=longest:dropout_transition=0:normalize=0,"
-            f"alimiter=limit=0.95[aout]"
+            + build_original_voice_mix_tail(
+                "[orig]", "[ru]", duck_original=duck_original, label_prefix="final_duck"
+            )
         )
     else:
         filter_complex = (

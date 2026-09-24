@@ -7,6 +7,7 @@ from datetime import datetime
 import os
 from videotranslator.config import DEFAULT_TARGET_LANGUAGE, get_target_language
 from videotranslator.core.diagnostics import safe_log_filename
+from videotranslator.core.io import atomic_write_text
 from videotranslator.core.paths import get_translated_texts_dir
 from videotranslator.core.timefmt import fmt_time
 
@@ -66,8 +67,7 @@ def write_translation_report(output_path: str, segments: list, pause_plan: list,
             lines.append(f"SRC ({source_label}): " + (seg.get("source") or "").strip())
             lines.append(f"{target_code.upper()}: " + (seg.get("translated") or "").strip())
             lines.append("")
-        with open(report_path, "w", encoding="utf-8") as file:
-            file.write("\n".join(lines))
+        atomic_write_text(Path(report_path), "\n".join(lines))
         if log:
             log(f"   📝 Отчёт сегментов → {report_path}")
         return report_path
@@ -121,8 +121,7 @@ def write_translated_text_file(output_path: str, segments: list, source_lang: st
             lines.append((seg.get("translated") or "").strip())
             lines.append("")
 
-        with open(path, "w", encoding="utf-8") as file:
-            file.write("\n".join(lines))
+        atomic_write_text(path, "\n".join(lines))
         if log:
             log(f"   📝 Текст перевода → {path}")
         return str(path)
@@ -130,3 +129,75 @@ def write_translated_text_file(output_path: str, segments: list, source_lang: st
         if log:
             log(f"      ⚠️ Не удалось сохранить текст перевода: {exc}")
         return ""
+
+
+def _srt_timestamp(seconds: float) -> str:
+    total_ms = max(0, int(round(float(seconds or 0.0) * 1000.0)))
+    hours, remainder = divmod(total_ms, 3_600_000)
+    minutes, remainder = divmod(remainder, 60_000)
+    secs, millis = divmod(remainder, 1000)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
+
+
+def _pause_shifted_time(seconds: float, pause_plan: list | None) -> float:
+    """Map a source-media timestamp onto the Pause Sync output timeline."""
+    value = max(0.0, float(seconds or 0.0))
+    extra = sum(
+        max(0.0, float(item.get("duration", 0.0)))
+        for item in (pause_plan or [])
+        if float(item.get("at", 0.0)) <= value + 1e-6
+    )
+    return value + extra
+
+
+def _render_srt(segments: list, text_key: str, pause_plan: list | None) -> str:
+    blocks = []
+    sequence = 0
+    for segment in segments or []:
+        text = " ".join(str(segment.get(text_key) or "").split())
+        if not text:
+            continue
+        start = _pause_shifted_time(float(segment.get("start", 0.0)), pause_plan)
+        end = _pause_shifted_time(float(segment.get("end", start)), pause_plan)
+        if end <= start:
+            end = start + 0.08
+        sequence += 1
+        blocks.append(
+            f"{sequence}\n{_srt_timestamp(start)} --> {_srt_timestamp(end)}\n{text}"
+        )
+    return "\n\n".join(blocks) + ("\n" if blocks else "")
+
+
+def write_subtitle_files(output_path: str, segments: list, pause_plan: list | None = None,
+                         source_lang: str = "auto", target_info: dict | None = None, log=None) -> dict:
+    """Write source and translated SRT sidecars aligned to the final Pause Sync timeline."""
+    paths = {}
+    try:
+        target_info = dict(target_info or get_target_language(DEFAULT_TARGET_LANGUAGE))
+        stem = Path(output_path).with_suffix("")
+
+        def safe_code(value: str, fallback: str) -> str:
+            cleaned = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in str(value or ""))
+            return cleaned.strip("_-") or fallback
+
+        source_code = safe_code(source_lang, "auto")
+        target_code = safe_code(target_info.get("code"), "target")
+        source_path = Path(f"{stem}_source_{source_code}.srt")
+        translated_path = Path(f"{stem}_translated_{target_code}.srt")
+
+        source_srt = _render_srt(segments, "source", pause_plan)
+        translated_srt = _render_srt(segments, "translated", pause_plan)
+        if source_srt:
+            atomic_write_text(source_path, source_srt)
+            paths["source"] = str(source_path)
+        if translated_srt:
+            atomic_write_text(translated_path, translated_srt)
+            paths["translated"] = str(translated_path)
+
+        if log and paths:
+            log("   💬 Субтитры SRT → " + ", ".join(paths.values()))
+        return paths
+    except Exception as exc:
+        if log:
+            log(f"      ⚠️ Не удалось сохранить SRT-субтитры: {exc}")
+        return paths

@@ -13,30 +13,49 @@ class TTSPrepareMixin:
     """Focused behavior-preserving mixin extracted for AI-local navigation."""
 
     def _get_prepared_tts_audio(self, text: str, voice: str, index: int,
-                                rate_pct: int, tag: str) -> str | None:
-        """Восстанавливает готовый WAV или создаёт и атомарно сохраняет его в постоянный кэш."""
+                                rate_pct: int, tag: str) -> tuple[str | None, str]:
+        """Возвращает подготовленный WAV и фактического провайдера финального исходника."""
         target_code = self.target_info.get("code") or "target"
         prepared_path = os.path.join(self.temp_dir, f"seg_{index:05d}_{tag}.wav")
         prepared_extra = {
             "audio_settings": self.audio_settings,
             "sample_rate": SAMPLE_RATE,
             "prepared_cache_schema": TTS_PREPARED_CACHE_SCHEMA_VERSION,
+            "local_piper_voice": str((getattr(self, "hybrid_translation_settings", {}) or {}).get("preferred_piper_voice") or ""),
         }
+        piper_cache_identities = []
+        if rate_pct == 0 and bool((getattr(self, "hybrid_translation_settings", {}) or {}).get("local_piper_fallback", True)):
+            try:
+                identities = self._resolve_piper_cache_identities(report_substitution=False)
+                piper_cache_identities = [
+                    {
+                        "piper_voice_id": identity.get("resolved_voice_id") or "",
+                        "piper_voice_revision": identity.get("voice_revision") or "",
+                    }
+                    for identity in identities
+                    if identity.get("model_path") is not None
+                ]
+            except Exception:
+                # generate_tts() remains the authoritative fallback boundary and will
+                # emit a detailed problem event if Piper really needs to be used.
+                piper_cache_identities = []
 
         # Кэш Edge и кэш gTTS разделены. Иначе WAV, когда-то созданный женским
         # резервным gTTS, мог выдаваться за выбранный мужской Edge-голос.
-        cache_providers = ["edge_tts"]
+        cache_candidates = [("edge_tts", {})]
+        if rate_pct == 0 and bool((getattr(self, "hybrid_translation_settings", {}) or {}).get("local_piper_fallback", True)):
+            cache_candidates.extend(("piper", identity) for identity in piper_cache_identities)
         if self._tts_allow_gtts_fallback and rate_pct == 0:
-            cache_providers.append("gtts")
+            cache_candidates.append(("gtts", {}))
 
-        for source_provider in cache_providers:
+        for source_provider, provider_identity in cache_candidates:
             cache_key = self.tts_cache.make_key(
                 text,
                 voice,
                 rate_pct,
                 f"prepared_wav_{source_provider}",
                 target_code,
-                extra={**prepared_extra, "source_provider": source_provider},
+                extra={**prepared_extra, **provider_identity, "source_provider": source_provider},
             )
             with self.tts_cache.key_lock(cache_key):
                 if self.tts_cache.restore(cache_key, prepared_path, suffix=".wav"):
@@ -44,8 +63,9 @@ class TTSPrepareMixin:
                     self._increment_tts_stat("prepared_cache_hits")
                     if source_provider == "gtts":
                         self._increment_tts_stat("gtts_prepared_cache_hits")
-                        self._mark_gtts_fallback(index)
-                    return prepared_path
+                    elif source_provider == "piper":
+                        self._increment_tts_stat("piper_prepared_cache_hits")
+                    return prepared_path, source_provider
 
         raw_path = os.path.join(self.temp_dir, f"seg_{index:05d}_{tag}.mp3")
         source_provider = self.generate_tts(
@@ -56,7 +76,15 @@ class TTSPrepareMixin:
             segment_index=index,
         )
         if not source_provider:
-            return None
+            return None, ""
+
+        provider_identity = {}
+        if source_provider == "piper":
+            actual = getattr(self, "_last_piper_provider_identity", None) or {}
+            provider_identity = {
+                "piper_voice_id": actual.get("resolved_voice_id") or "",
+                "piper_voice_revision": actual.get("voice_revision") or "",
+            }
 
         cache_key = self.tts_cache.make_key(
             text,
@@ -64,7 +92,7 @@ class TTSPrepareMixin:
             rate_pct,
             f"prepared_wav_{source_provider}",
             target_code,
-            extra={**prepared_extra, "source_provider": source_provider},
+            extra={**prepared_extra, **provider_identity, "source_provider": source_provider},
         )
         with self.tts_cache.key_lock(cache_key):
             # Пока ожидали блокировку, другой поток мог уже подготовить тот же WAV.
@@ -73,8 +101,7 @@ class TTSPrepareMixin:
                 self._increment_tts_stat("prepared_cache_hits")
                 if source_provider == "gtts":
                     self._increment_tts_stat("gtts_prepared_cache_hits")
-                    self._mark_gtts_fallback(index)
-                return prepared_path
+                return prepared_path, source_provider
 
             if polish_tts_audio(
                 self.ffmpeg,
@@ -103,8 +130,8 @@ class TTSPrepareMixin:
                 )
                 if not cache_stored:
                     self._increment_tts_stat("prepared_cache_skipped_size_limit")
-                return prepared_path
-            return raw_path
+                return prepared_path, source_provider
+            return raw_path, source_provider
 
     def _prepare_tts_segment(self, text: str, voice: str, index: int,
                              target_slot: float, hard_slot: float) -> tuple[str, float, dict] | tuple[None, float, dict]:
@@ -122,9 +149,14 @@ class TTSPrepareMixin:
             "tempo_method": "",
             "video_pause_needed": False,
             "total_speed": 1.0,
+            "source_provider": "",
         }
 
-        current_path = self._get_prepared_tts_audio(text, voice, index, 0, "edge_0")
+        current_result = self._get_prepared_tts_audio(text, voice, index, 0, "edge_0")
+        if isinstance(current_result, tuple):
+            current_path, current_provider = current_result
+        else:  # compatibility for tests/legacy monkeypatches returning only a path
+            current_path, current_provider = current_result, "edge_tts" if current_result else ""
         if not current_path:
             return None, 0.0, stats
         segment_log = lambda message: self._tts_segment_log(index, message)
@@ -144,13 +176,18 @@ class TTSPrepareMixin:
         )
         if native_rate > 0:
             self._check_cancel()
-            candidate = self._get_prepared_tts_audio(
+            candidate_result = self._get_prepared_tts_audio(
                 text, voice, index, native_rate, f"edge_{native_rate}"
             )
+            if isinstance(candidate_result, tuple):
+                candidate, candidate_provider = candidate_result
+            else:  # compatibility for tests/legacy monkeypatches returning only a path
+                candidate, candidate_provider = candidate_result, "edge_tts" if candidate_result else ""
             if candidate:
                 candidate_dur = get_audio_duration(self.ffprobe, candidate, segment_log)
                 if 0 < candidate_dur < current_dur * 0.995:
                     current_path = candidate
+                    current_provider = candidate_provider
                     current_dur = candidate_dur
                     stats["native_rate"] = native_rate
 
@@ -178,6 +215,8 @@ class TTSPrepareMixin:
                         segment_log("⚠️ Длительность ускоренной фразы не подтверждена; сохранена исходная озвучка.")
 
         stats["total_speed"] = max(1.0, base_dur / current_dur) if current_dur > 0 else 1.0
+        stats["source_provider"] = current_provider
+        self._set_final_tts_provider(index, current_provider)
         if current_dur > hard_slot + MIN_INSERTED_PAUSE:
             stats["video_pause_needed"] = True
 

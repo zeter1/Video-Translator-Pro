@@ -156,6 +156,7 @@ class ProblemLogger(ProblemAnalysisMixin, ProblemReportingMixin):
                 "voice_may_differ": False,
             },
             "tts_cache": {},
+            "pause_sync": {},
             "network": {
                 "incidents_started": 0,
                 "incidents_finished": 0,
@@ -277,7 +278,12 @@ class ProblemLogger(ProblemAnalysisMixin, ProblemReportingMixin):
                 "thread": threading.current_thread().name,
                 "diagnostic": {
                     "is_problem": level in {"warning", "error"},
+                    "event_code": event,
                     "family": family,
+                    "pipeline_stage": safe_details.get("stage") or "",
+                    "failure_kind": safe_details.get("failure_kind") or "",
+                    "impact": safe_details.get("impact") or "",
+                    "recovery_action": safe_details.get("recovery_action") or "",
                     "actionability": "investigate" if level == "error" else ("review" if level == "warning" else "context"),
                     "signature": signature,
                     "occurrence": occurrence,

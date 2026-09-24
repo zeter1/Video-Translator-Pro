@@ -14,9 +14,11 @@ from videotranslator.ui.batch import UIBatchMixin
 from videotranslator.ui.review import UIReviewMixin
 from videotranslator.ui.controls import UIControlsMixin
 from videotranslator.ui.settings import UISettingsMixin
+from videotranslator.ui.models_tab import UIModelsMixin
+from videotranslator.ui.tasks import UITasksMixin
 
 
-class App(UILayoutMixin, UINetworkMixin, UIQueueMixin, UIBatchMixin, UIReviewMixin, UIControlsMixin, UISettingsMixin):
+class App(UILayoutMixin, UINetworkMixin, UIQueueMixin, UIBatchMixin, UITasksMixin, UIReviewMixin, UIControlsMixin, UISettingsMixin, UIModelsMixin):
     """Tkinter application composition root."""
 
     def __init__(self, root: tk.Tk):
@@ -31,6 +33,14 @@ class App(UILayoutMixin, UINetworkMixin, UIQueueMixin, UIBatchMixin, UIReviewMix
         self._processing = False
         self._closing = False
         self._suspend_save = True
+        self._settings_save_after_id = None
+        self._worker_thread = None
+        self._task_queue_lock = threading.RLock()
+        self._task_queue_state = {"schema_version": 1, "tasks": []}
+        self._task_queue_dirty = False
+        self._active_task_id = None
+        self._task_dispatch_after_id = None
+        self._close_deadline_monotonic = None
         self.file_logger = None
         self.last_log_path = ""
         self.problem_logger = None
@@ -47,10 +57,13 @@ class App(UILayoutMixin, UINetworkMixin, UIQueueMixin, UIBatchMixin, UIReviewMix
 
         self._build_ui()
         self.load_settings()
+        self._load_task_queue()
         self._suspend_save = False
         self._apply_keep_state(save=False)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self._safe_after(250, self._offer_batch_recovery)
+        self._safe_after(900, self.schedule_model_maintenance)
+        self._safe_after(1800, self._dispatch_next_task)
 
 
     def _safe_after(self, delay_ms: int, func, *args):

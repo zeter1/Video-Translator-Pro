@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import time
 from videotranslator.config import EDGE_VOICE_PRESERVE_SEC, EDGE_VOICE_PROBE_INTERVAL_SEC
+from videotranslator.core.diagnostics import compact_exception
 
 
 class NetworkVoiceMixin:
@@ -38,24 +39,22 @@ class NetworkVoiceMixin:
             self.edge_voice_fallback_request_reason = ""
 
         self.log(
-            "      🔔 Edge TTS нестабилен через текущий VPN. "
-            f"До {EDGE_VOICE_PRESERVE_SEC}с сохраняю выбранный голос и жду смены VPN-сервера."
+            "      🔀 Edge TTS недоступен: ручная смена VPN не требуется; "
+            "программа автоматически выберет рабочий локальный/сетевой резерв."
         )
         self._emit_problem(
             "tts_voice_preservation_started",
             level="warning",
-            message="Edge TTS нестабилен; программа временно не использует голос gTTS и ждёт смены VPN.",
+            message=(
+                "Edge TTS недоступен; ручное вмешательство не требуется, "
+                "запущен автоматический выбор резервного TTS."
+            ),
             voice=self.selected_voice,
             incident=incident,
             reason=reason,
-            wait_sec=EDGE_VOICE_PRESERVE_SEC,
-            automatic_fallback_after_sec=EDGE_VOICE_PRESERVE_SEC,
-        )
-        self._notify_network_notice(
-            "unstable",
-            incident=incident,
-            reason=reason,
-            wait_sec=EDGE_VOICE_PRESERVE_SEC,
+            wait_sec=0,
+            automatic_fallback_after_sec=0,
+            user_action_required=False,
         )
         return incident
 
@@ -73,7 +72,7 @@ class NetworkVoiceMixin:
 
         self._emit_problem(
             "tts_voice_preservation_finished",
-            message="Ожидание выбранного голоса завершено.",
+            message="Автоматический выбор доступного TTS-маршрута завершён.",
             voice=self.selected_voice,
             incident=incident,
             reason=reason,
@@ -85,7 +84,7 @@ class NetworkVoiceMixin:
 
 
     def request_edge_probe_now(self):
-        """Вызывается кнопкой после того, как пользователь сменил VPN-сервер."""
+        """Legacy hook for one immediate Edge health probe; never required by UI."""
         with self.edge_voice_lock:
             if not self.edge_voice_preservation_active:
                 return False
@@ -93,8 +92,8 @@ class NetworkVoiceMixin:
         self.edge_network_guard.request_probe_now()
         self.edge_voice_probe_requested.set()
         self._emit_problem(
-            "vpn_server_change_probe_requested",
-            message="Пользователь сообщил о смене VPN-сервера; Edge TTS будет проверен немедленно.",
+            "edge_immediate_probe_requested",
+            message="Запрошена немедленная фоновая проверка Edge TTS.",
             voice=self.selected_voice,
             incident=incident,
         )
@@ -102,7 +101,7 @@ class NetworkVoiceMixin:
 
 
     def allow_gtts_fallback_now(self, reason: str = "user_requested"):
-        """Разрешает пользователю не ждать окончания защитного окна."""
+        """Legacy compatibility hook; automatic mode normally enables this itself."""
         with self.edge_voice_lock:
             if not self.edge_voice_preservation_active:
                 return False
@@ -111,7 +110,7 @@ class NetworkVoiceMixin:
         self.edge_voice_fallback_requested.set()
         self._emit_problem(
             "tts_gtts_fallback_requested",
-            message="Пользователь разрешил перейти на резервный gTTS до окончания ожидания Edge TTS.",
+            message="Резервный gTTS разрешён без ожидания и без интерактивного подтверждения.",
             voice=self.selected_voice,
             incident=incident,
             reason=reason,
@@ -129,20 +128,14 @@ class NetworkVoiceMixin:
             incident = self.edge_voice_incident
 
         self.log(
-            "      ↩️ Edge TTS не восстановился. Включён резервный gTTS только для "
-            "оставшихся сегментов; тембр голоса может отличаться."
+            "      ↩️ Edge TTS недоступен. Резервный gTTS включён автоматически "
+            "для оставшихся сегментов; тембр голоса может отличаться."
         )
         self._emit_problem(
             "tts_gtts_fallback_enabled",
             level="warning",
-            message="Edge TTS не восстановился; для оставшихся сегментов разрешён резервный gTTS.",
+            message="Edge TTS недоступен; резервный gTTS автоматически разрешён для оставшихся сегментов.",
             voice=self.selected_voice,
-            incident=incident,
-            reason=self._tts_fallback_reason,
-            voice_may_differ=True,
-        )
-        self._notify_network_notice(
-            "fallback",
             incident=incident,
             reason=self._tts_fallback_reason,
             voice_may_differ=True,
@@ -155,71 +148,90 @@ class NetworkVoiceMixin:
             self._check_cancel()
 
 
+    def _probe_edge_voice_once(self, text: str, voice: str, segment_index: int) -> bool:
+        """One bounded real Edge request used before final voice-consistency repair.
+
+        This intentionally bypasses the storm cooldown only once.  It never falls back
+        to gTTS and does not start another 120-second preservation window.
+        """
+        probe_path = os.path.join(self.temp_dir, f"edge_final_probe_{segment_index:05d}.mp3")
+        parallel_acquired = False
+        probe_acquired = False
+        try:
+            self._check_cancel()
+            self._acquire_network_gate(self.edge_parallel_gate)
+            parallel_acquired = True
+            self._acquire_network_gate(self.edge_probe_gate)
+            probe_acquired = True
+            if os.path.exists(probe_path):
+                os.remove(probe_path)
+            self._run_edge_tts(text, probe_path, voice, rate="+0%")
+            if not os.path.exists(probe_path) or os.path.getsize(probe_path) <= 200:
+                raise RuntimeError("Edge TTS probe created an empty audio file")
+            if self.edge_network_guard.is_active():
+                self.edge_network_guard.force_recovery("edge_tts", reason="final_voice_repair_probe")
+            else:
+                self.edge_network_guard.record_success("edge_tts")
+            self._emit_problem(
+                "tts_final_voice_repair_probe_succeeded",
+                message="Edge TTS отвечает; разрешена финальная замена резервных gTTS-фраз выбранным голосом.",
+                tts_segment_index=segment_index,
+                voice=voice,
+            )
+            return True
+        except Exception as exc:
+            self.edge_network_guard.record_failure("edge_tts", exc)
+            self._emit_problem(
+                "tts_final_voice_repair_probe_failed",
+                level="warning",
+                message="Финальная проверка Edge TTS не прошла; готовые gTTS-фразы сохраняются без дополнительного ожидания.",
+                tts_segment_index=segment_index,
+                voice=voice,
+                exception={
+                    "type": type(exc).__name__,
+                    "message": compact_exception(exc, max_len=1000),
+                },
+            )
+            return False
+        finally:
+            if probe_acquired:
+                self.edge_probe_gate.release()
+            if parallel_acquired:
+                self.edge_parallel_gate.release()
+            try:
+                if os.path.exists(probe_path):
+                    os.remove(probe_path)
+            except OSError:
+                pass
+
+
     def _await_selected_voice_or_fallback(self, text: str, voice: str,
                                            segment_index: int) -> str:
-        """
-        Даёт пользователю время сменить VPN и проверяет Edge реальным TTS-запросом.
+        """Select a working TTS route without asking the user to change VPN.
 
-        Возвращает ``edge_recovered`` либо ``gtts_allowed``. Ожидание ограничено,
-        поэтому полностью недоступный Edge не может навсегда остановить программу.
+        The normal generation path already tries the selected Edge voice and then
+        any installed compatible Piper voice.  If those routes cannot prepare the
+        segment, recovery immediately enables gTTS.  A previously requested manual
+        probe is still honoured once for backwards compatibility, but there is no
+        countdown, popup-driven wait, or repeated VPN polling.
         """
         incident = self._begin_edge_voice_preservation(reason="edge_segments_deferred")
-        with self.edge_voice_lock:
-            deadline = self.edge_voice_deadline
 
-        next_probe_at = time.monotonic() + max(
-            1.0,
-            min(30.0, self.edge_network_guard.seconds_until_probe() or 15.0),
-        )
-        probe_number = 0
-        probe_path = os.path.join(self.temp_dir, f"edge_vpn_probe_{segment_index:05d}.mp3")
+        # Preserve the old explicit API for callers/tests, but never require it.
+        if self.edge_voice_fallback_requested.is_set():
+            with self.edge_voice_lock:
+                reason = self.edge_voice_fallback_request_reason or "user_requested"
+            self._enable_gtts_fallback(reason)
+            self._finish_edge_voice_preservation(reason="fallback_selected")
+            return "gtts_allowed"
 
-        while True:
-            self._check_cancel()
-            now = time.monotonic()
-
-            if self.edge_voice_fallback_requested.is_set():
-                with self.edge_voice_lock:
-                    reason = self.edge_voice_fallback_request_reason or "user_requested"
-                self._enable_gtts_fallback(reason)
-                return "gtts_allowed"
-
-            remaining = max(0.0, deadline - now)
-            if remaining <= 0:
-                self._enable_gtts_fallback("edge_wait_timeout")
-                return "gtts_allowed"
-
-            manual_probe = self.edge_voice_probe_requested.is_set()
-            if manual_probe:
-                self.edge_voice_probe_requested.clear()
-                self.edge_network_guard.request_probe_now()
-
-            automatic_probe = (
-                now >= next_probe_at
-                and self.edge_network_guard.seconds_until_probe() <= 0
-            )
-            if manual_probe or automatic_probe:
-                probe_number += 1
-                self.set_progress(
-                    81,
-                    f"Проверка Edge TTS после смены VPN (попытка {probe_number})...",
-                )
-                self._emit_problem(
-                    "tts_edge_probe_started",
-                    message="Проверяется доступность выбранного голоса Edge TTS.",
-                    tts_segment_index=segment_index,
-                    voice=voice,
-                    incident=incident,
-                    probe_number=probe_number,
-                    manual=manual_probe,
-                    remaining_wait_sec=round(remaining, 1),
-                )
-                self._notify_network_notice(
-                    "checking",
-                    incident=incident,
-                    probe_number=probe_number,
-                    manual=manual_probe,
-                )
+        # If an external caller explicitly requested an immediate Edge re-check, do
+        # exactly one bounded probe.  Failure falls through to automatic fallback.
+        if self.edge_voice_probe_requested.is_set():
+            self.edge_voice_probe_requested.clear()
+            self.edge_network_guard.request_probe_now()
+            probe_path = os.path.join(self.temp_dir, f"edge_manual_probe_{segment_index:05d}.mp3")
+            try:
                 provider = self.generate_tts(
                     text,
                     probe_path,
@@ -229,46 +241,35 @@ class NetworkVoiceMixin:
                     allow_gtts=False,
                 )
                 if provider == "edge_tts":
-                    forced = self.edge_network_guard.force_recovery(
-                        "edge_tts",
-                        reason="successful_vpn_probe",
+                    self.edge_network_guard.force_recovery(
+                        "edge_tts", reason="successful_manual_probe"
                     )
-                    if not forced:
-                        self._finish_edge_voice_preservation(
-                            reason="successful_vpn_probe",
-                            notify_action="recovered",
-                        )
-                    self.log("      ✅ Новый VPN-маршрут подходит: выбранный голос Edge TTS восстановлен.")
-                    self._emit_problem(
-                        "tts_voice_preservation_recovered",
-                        message="Проверка Edge TTS успешна; озвучка продолжится выбранным голосом.",
-                        tts_segment_index=segment_index,
-                        voice=voice,
-                        incident=incident,
-                        probe_number=probe_number,
+                    self._finish_edge_voice_preservation(
+                        reason="successful_manual_probe",
+                        notify_action="recovered",
                     )
+                    self.log("      ✅ Edge TTS снова доступен; выбранный голос сохранён.")
                     return "edge_recovered"
+            finally:
+                try:
+                    if os.path.exists(probe_path):
+                        os.remove(probe_path)
+                except OSError:
+                    pass
 
-                wait_for_probe = self.edge_network_guard.seconds_until_probe()
-                next_probe_at = time.monotonic() + max(
-                    float(EDGE_VOICE_PROBE_INTERVAL_SEC),
-                    wait_for_probe,
-                )
-                self._emit_problem(
-                    "tts_edge_probe_failed",
-                    level="warning",
-                    message="Edge TTS всё ещё недоступен; ожидание смены VPN продолжается.",
-                    tts_segment_index=segment_index,
-                    voice=voice,
-                    incident=incident,
-                    probe_number=probe_number,
-                    next_probe_after_sec=round(max(0.0, next_probe_at - time.monotonic()), 1),
-                    remaining_wait_sec=round(max(0.0, deadline - time.monotonic()), 1),
-                )
-
-            self.set_progress(
-                80,
-                f"VPN нестабилен: смените сервер и нажмите «Проверить» "
-                f"(ожидание ещё {int(remaining) + 1}с)...",
-            )
-            self._sleep_or_cancel(min(0.5, remaining))
+        self._enable_gtts_fallback("automatic_edge_unavailable")
+        self._finish_edge_voice_preservation(reason="automatic_fallback_selected")
+        self._emit_problem(
+            "tts_automatic_fallback_selected",
+            level="warning",
+            message=(
+                "Выбранный Edge-голос и локальный Piper не подготовили сегмент; "
+                "программа без участия пользователя перешла на рабочий сетевой резерв."
+            ),
+            tts_segment_index=segment_index,
+            voice=voice,
+            incident=incident,
+            fallback_provider="gtts",
+            user_action_required=False,
+        )
+        return "gtts_allowed"

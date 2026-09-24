@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 from videotranslator.config import MAX_NATIVE_TTS_RATE, MIN_INSERTED_PAUSE, MIN_SYNC_GAP, SAMPLE_RATE, TARGET_HEADROOM, TOTAL_MAX_SPEECH_SPEED
+from videotranslator.media.audio import build_original_voice_mix_tail
 
 
 def merge_short_segments(segments: list, min_dur: float = 1.20,
@@ -147,7 +148,8 @@ def merge_nearby_pause_plan(pause_plan: list, video_dur: float, segments: list,
 
 def make_filter_script_for_pauses(temp_dir: str, pause_plan: list, video_dur: float,
                                   final_dur: float, keep_original: bool,
-                                  orig_vol_pct: int, audio_stream_index: int | None = None) -> str:
+                                  orig_vol_pct: int, audio_stream_index: int | None = None,
+                                  duck_original: bool = False, video_fps: float | None = None) -> str:
     """
     Создаёт filter_complex_script для ffmpeg.
     Видео расширяется стоп-кадрами, оригинальный фон — тишиной в местах стоп-кадров,
@@ -166,6 +168,33 @@ def make_filter_script_for_pauses(temp_dir: str, pause_plan: list, video_dur: fl
     def f(value: float) -> str:
         return f"{float(value):.6f}"
 
+    try:
+        frame_rate = float(video_fps) if video_fps is not None else 0.0
+    except (TypeError, ValueError):
+        frame_rate = 0.0
+    if not (frame_rate > 0.0):
+        frame_rate = 0.0
+
+    def tpad_option(kind: str, duration: float) -> str:
+        """Prefer exact frame counts when source FPS is known.
+
+        This mirrors final-video validation and avoids FFmpeg builds where
+        duration-based tpad on a trimmed branch fails to emit the requested clone
+        frames.  The duration form remains a compatibility fallback for callers
+        that do not know source FPS.
+        """
+        if frame_rate > 0.0:
+            frames = max(1, int(float(duration) * frame_rate + 0.5))
+            return f"{kind}={frames}"
+        return f"{kind}_duration={f(duration)}"
+
+    def fps_filter() -> str:
+        # Recent FFmpeg releases can propagate a zero frame-rate through trim/setpts.
+        # tpad then emits cloned frames with identical PTS and the encoder drops them.
+        # Explicit FPS on Pause Sync branches gives tpad a stable frame duration and
+        # matches the single-FPS quantization already used by final validation.
+        return f"fps=fps={f(frame_rate)}:round=near," if frame_rate > 0.0 else ""
+
     for pause_index, pause in enumerate(pause_plan):
         at = max(cursor, min(float(video_dur), float(pause["at"])))
         pause_dur = max(0.0, float(pause["duration"]))
@@ -181,7 +210,7 @@ def make_filter_script_for_pauses(temp_dir: str, pause_plan: list, video_dur: fl
             vlabel = f"v{chunk_index}"
             lines.append(
                 f"[0:V:0]trim=start={f(cursor)}:end={f(at)},setpts=PTS-STARTPTS,"
-                f"tpad=stop_mode=clone:stop_duration={f(pause_dur)}[{vlabel}]"
+                f"{fps_filter()}tpad=stop_mode=clone:{tpad_option('stop', pause_dur)}[{vlabel}]"
             )
             video_labels.append(f"[{vlabel}]")
 
@@ -201,6 +230,9 @@ def make_filter_script_for_pauses(temp_dir: str, pause_plan: list, video_dur: fl
 
     if float(video_dur) > cursor:
         vlabel = f"v{chunk_index}"
+        # Keep ordinary tail chunks on their native timestamps.  Only a branch that
+        # actually needs tpad is normalized to a known FPS; this avoids needlessly
+        # converting the whole Pause Sync result to CFR for variable-frame-rate input.
         lines.append(
             f"[0:V:0]trim=start={f(cursor)}:end={f(video_dur)},setpts=PTS-STARTPTS[{vlabel}]"
         )
@@ -219,8 +251,14 @@ def make_filter_script_for_pauses(temp_dir: str, pause_plan: list, video_dur: fl
         video_labels = ["[vbase]"]
 
     if leading_pause:
+        # Duration-based tpad can lose clone frames after trim/setpts on recent FFmpeg
+        # when the branch carries no reliable frame rate. Normalize only this branch.
+        leading_source = video_labels[0]
+        if frame_rate > 0.0:
+            lines.append(f"{leading_source}{fps_filter().rstrip(',')}[vlead_fps]")
+            leading_source = "[vlead_fps]"
         lines.append(
-            f"{video_labels[0]}tpad=start_mode=clone:start_duration={f(leading_pause)}[vlead]"
+            f"{leading_source}tpad=start_mode=clone:{tpad_option('start', leading_pause)}[vlead]"
         )
         video_labels[0] = "[vlead]"
 
@@ -242,7 +280,9 @@ def make_filter_script_for_pauses(temp_dir: str, pause_plan: list, video_dur: fl
         else:
             lines.append("".join(audio_labels) + f"concat=n={len(audio_labels)}:v=0:a=1,"
                          f"volume={max(0.0, min(1.0, float(orig_vol_pct) / 100.0)):.4f}[orig_ext]")
-        lines.append("[orig_ext][ru]amix=inputs=2:duration=longest:dropout_transition=0:normalize=0,alimiter=limit=0.95[aout]")
+        lines.append(build_original_voice_mix_tail(
+            "[orig_ext]", "[ru]", duck_original=duck_original, label_prefix="pause_duck"
+        ))
     else:
         lines.append("[ru]anull[aout]")
 

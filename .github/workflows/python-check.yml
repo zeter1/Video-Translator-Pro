@@ -25,7 +25,13 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.13"
+          python-version: "3.12"
+
+      - name: Install runtime dependencies
+        shell: pwsh
+        run: |
+          python -m pip install -r requirements.txt -r requirements-optional-ai.txt
+          python -m pip check
 
       - name: Compile application, package, tests and tools
         shell: pwsh
@@ -43,7 +49,7 @@ jobs:
     needs: verify
     if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && contains(github.event.head_commit.message, '[package]'))
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 120
     env:
       PYTHONUTF8: "1"
       PYTHONIOENCODING: "utf-8"
@@ -64,6 +70,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
+          python -m pip install -r requirements-optional-ai.txt
           python -m pip install "pyinstaller==6.22.3"
           python -m pip check
 
@@ -91,16 +98,9 @@ jobs:
       - name: Build self-contained Windows EXE
         shell: pwsh
         run: |
-          $args = @(
-            '--noconfirm','--clean','--onefile','--windowed',
-            '--name','Video-Translator-Pro',
-            '--collect-all','whisper',
-            '--collect-all','tiktoken',
-            '--add-binary', "$env:FFMPEG_BINARY;.",
-            '--add-binary', "$env:FFPROBE_BINARY;.",
-            'video_translator.py'
-          )
-          python -m PyInstaller @args
+          python tools/build_exe.py --onefile
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Move-Item -LiteralPath 'dist\VideoTranslatorPRO.exe' -Destination 'dist\Video-Translator-Pro.exe'
 
       - name: Smoke-test packaged EXE and create checksum
         shell: pwsh

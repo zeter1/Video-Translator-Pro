@@ -39,8 +39,10 @@ class PauseMediaTests(unittest.TestCase):
                  "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", str(source)])
             run([ffmpeg, "-v", "error", "-nostdin", "-f", "lavfi", "-i",
                  "anullsrc=r=48000:cl=stereo:d=5", str(voice)])
-            script = make_filter_script_for_pauses(directory, [{"at": position, "duration": 1.0}],
-                                                   4.0, 5.0, True, 15)
+            script = make_filter_script_for_pauses(
+                directory, [{"at": position, "duration": 1.0}],
+                4.0, 5.0, True, 15, video_fps=25.0,
+            )
             run([ffmpeg, "-v", "error", "-nostdin", "-i", str(source), "-i", str(voice),
                  "-filter_complex_script", script, "-map", "[vout]", "-map", "[aout]",
                  "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", "-t", "5", str(output)])

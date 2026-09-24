@@ -129,6 +129,16 @@ class VideoTranslator(ProcessMixin, NetworkVoiceMixin, TranslationMixin, TTSMixi
         self.gtts_parallel_gate = threading.BoundedSemaphore(2)
         self.tts_cache = TTSCache()
         self.tts_stats_lock = threading.Lock()
+        self.source_language = ""
+        self.hybrid_translation_settings = {
+            "local_first": True,
+            "auto_install_argos_pairs": True,
+            "local_piper_fallback": True,
+            "preferred_piper_voice": "piper-dmitri-ru",
+        }
+        self.local_translation_manager = None
+        self.shared_translation_circuit = None
+        self._piper_voice_engine = None
         self.tts_stats = {}
         self.tts_gtts_segments = set()
 
@@ -169,7 +179,29 @@ class VideoTranslator(ProcessMixin, NetworkVoiceMixin, TranslationMixin, TTSMixi
             return self.tts_stats[name]
 
     def _mark_gtts_fallback(self, segment_index: int) -> int:
-        with self.tts_stats_lock:
-            self.tts_gtts_segments.add(int(segment_index or 0))
+        return self._set_final_tts_provider(segment_index, "gtts")
+
+    def _set_final_tts_provider(self, segment_index: int, provider: str) -> int:
+        """Keeps ``gtts_fallback`` aligned with the provider used by the final segment audio.
+
+        A segment may temporarily fall back to gTTS and later be successfully regenerated
+        by Edge TTS (for example, with a native rate).  Counting the temporary fallback
+        forever made the diagnostics report a mixed voice even when the final WAV was Edge.
+        """
+        index = int(segment_index or 0)
+        normalized = str(provider or "").strip().lower()
+        lock = getattr(self, "tts_stats_lock", None)
+        if lock is None:
+            return 0
+        with lock:
+            if not hasattr(self, "tts_gtts_segments"):
+                self.tts_gtts_segments = set()
+            if not hasattr(self, "tts_stats"):
+                self.tts_stats = {}
+            if normalized == "gtts":
+                self.tts_gtts_segments.add(index)
+            else:
+                # Edge or local Piper replaced any temporary gTTS audio.
+                self.tts_gtts_segments.discard(index)
             self.tts_stats["gtts_fallback"] = len(self.tts_gtts_segments)
             return self.tts_stats["gtts_fallback"]

@@ -1,0 +1,8 @@
+# Optional local Hybrid AI runtime. Model/voice DATA is downloaded separately
+# from the "Переводчики и голоса" tab. build_exe.bat installs these before
+# freezing so the finished EXE can import the engines without external Python.
+argostranslate
+transformers>=4,<6
+sentencepiece
+huggingface_hub
+piper-tts==1.8.0

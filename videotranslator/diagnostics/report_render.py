@@ -43,6 +43,7 @@ class ProblemReportRenderMixin:
             "validation_boundaries": [
                 "Отчёт не доказывает визуальную корректность GUI.",
                 "Успешный subprocess не доказывает качество итогового перевода или озвучки без проверки медиа.",
+                "Строковый ответ сервиса перевода не считается успешным, пока не пройдёт проверку на HTTP/HTML/error/block payload.",
                 "Сетевые причины являются подтверждёнными только при наличии соответствующей ошибки в событии.",
             ],
         }
@@ -102,6 +103,31 @@ class ProblemReportRenderMixin:
             "",
             f"- Пакет: статус `{batch.get('status') or 'idle'}`, всего {int(batch.get('total') or 0)}, успешно {int(batch.get('successful') or 0)}, ошибок {int(batch.get('failed') or 0)}, ожидают {int(batch.get('pending') or 0)}.",
             f"- Файл: статус `{current.get('status') or 'idle'}`, этап `{current.get('stage') or 'не указан'}`, результат `{current.get('output_path') or 'не создан'}`.",
+        ])
+
+        pause_sync = summary.get("pause_sync") or {}
+        if pause_sync:
+            pause_count = int(pause_sync.get("pause_count") or 0)
+            total_pause_sec = float(pause_sync.get("total_pause_sec") or 0.0)
+            pause_ratio = float(pause_sync.get("pause_ratio") or 0.0)
+            severe_pause_count = int(pause_sync.get("severe_pause_count") or 0)
+            max_pause_sec = float(pause_sync.get("max_pause_sec") or 0.0)
+            lines.extend([
+                "",
+                "## Качество Pause Sync",
+                "",
+                f"- Стоп-кадров: {pause_count}; добавлено {total_pause_sec:.2f}с ({pause_ratio * 100:.1f}% длительности исходного видео).",
+                f"- Длинных пауз ≥2с: {severe_pause_count}; максимум: {max_pause_sec:.2f}с.",
+            ])
+            top_pauses = pause_sync.get("top_pause_segments") or []
+            if top_pauses:
+                preview = []
+                for item in top_pauses[:5]:
+                    segments = ",".join(str(value) for value in (item.get("segments") or [])) or "?"
+                    preview.append(f"seg {segments}: +{float(item.get('duration_sec') or 0.0):.2f}с")
+                lines.append(f"- Самые длинные: {', '.join(preview)}.")
+
+        lines.extend([
             "",
             "## Сгруппированные проблемы",
             "",
@@ -158,6 +184,13 @@ class ProblemReportRenderMixin:
                 validation = context.get("validation") if isinstance(context.get("validation"), dict) else {}
                 if validation.get("reason"):
                     tech_parts.append(f"validation_reason={validation.get('reason')}")
+                response_validation = context.get("response_validation") if isinstance(context.get("response_validation"), dict) else {}
+                if response_validation.get("reason"):
+                    tech_parts.append(f"translation_response={response_validation.get('reason')}")
+                if context.get("failure_kind"):
+                    tech_parts.append(f"failure_kind={context.get('failure_kind')}")
+                if context.get("recovery_action"):
+                    tech_parts.append(f"recovery={context.get('recovery_action')}")
                 for check in (validation.get("checks") or [])[:2]:
                     if not isinstance(check, dict):
                         continue
@@ -189,6 +222,15 @@ class ProblemReportRenderMixin:
                 f"\nЕщё карточек вне компактного отчёта: {omitted_cards}. Их счётчики доступны в "
                 "`problem_counts_by_event`/`problem_counts_by_category`, а примеры — в `problems.jsonl`."
             )
+
+        lines.extend(["", "## Контракт анализа для ChatGPT / Codex", ""])
+        contract = analysis.get("ai_debug_contract") or {}
+        lines.extend([
+            f"- Цель: {contract.get('goal') or 'найти первопричину по структурированным доказательствам'}",
+            f"- Правило: {contract.get('rule') or 'сначала evidence, затем гипотеза'}",
+            "- Для каждой карточки сначала смотрите `event/signature/stage`, затем `confirmed_evidence.context`, потом playbook и только после этого код.",
+            "- Если есть `response_validation`, `validation`, `stderr_tail`, `return_code` или traceback — это первичные технические доказательства, их нельзя заменять догадкой.",
+        ])
 
         lines.extend(["", "## Что можно улучшить в программе", ""])
         for item in analysis.get("program_improvement_candidates") or []:

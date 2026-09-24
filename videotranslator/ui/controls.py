@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import tkinter as tk
+from tkinter import filedialog
 from videotranslator.config import DEFAULT_TARGET_LANGUAGE, TOTAL_MAX_SPEECH_SPEED, get_voice_options, normalize_audio_settings
 
 
@@ -10,27 +12,71 @@ class UIControlsMixin:
     """Behavior-preserving methods extracted from the legacy monolith."""
 
     def _threadsafe_progress(self, value: int, status: str = ""):
-        self._safe_after(0, self._set_progress, value, status)
+        task_id = str(getattr(self, "_active_task_id", "") or "")
+        self._safe_after(0, self._set_progress_for_task, task_id, value, status)
+        if hasattr(self, "_update_active_task_progress"):
+            self._safe_after(0, self._update_active_task_progress, value, status, task_id)
+
+
+    def _set_progress_for_task(self, task_id: str, value: int, status: str = ""):
+        """Ignore late progress callbacks after ownership moved to another queue task."""
+        task_id = str(task_id or "")
+        if task_id and task_id != str(getattr(self, "_active_task_id", "") or ""):
+            return
+        self._set_progress(value, status)
 
 
     def cancel(self):
         if self._processing:
             self._cancel_event.set()
             self._log("⏹ Отмена...")
+            if hasattr(self, "_request_active_task_cancel"):
+                self._request_active_task_cancel()
             self.btn_cancel.config(state="disabled")
+
+
+    def _choose_output_folder(self):
+        current = str(self.var_output_dir.get() or "").strip() if hasattr(self, "var_output_dir") else ""
+        dialog_options = {"title": "Папка для готовых переведённых видео"}
+        if current and os.path.isdir(current):
+            dialog_options["initialdir"] = current
+        selected = filedialog.askdirectory(**dialog_options)
+        if not selected:
+            return ""
+        selected = os.path.abspath(selected)
+        self.var_output_dir.set(selected)
+        self.save_settings()
+        return selected
 
 
     def _set_busy(self, busy: bool):
         self._processing = busy
+        queue_mode = hasattr(self, "_task_queue_state")
+        if queue_mode:
+            # Current worker owns a snapshot of all settings, so the form remains
+            # editable and the user can enqueue the next task while translation runs.
+            self.btn_start.config(
+                state="normal",
+                text="➕ ДОБАВИТЬ В ОЧЕРЕДЬ" if busy else "▶  НАЧАТЬ ОБРАБОТКУ",
+            )
+            self.btn_cancel.config(state="normal" if busy else "disabled")
+            if hasattr(self, "_refresh_model_button_state"):
+                self._refresh_model_button_state()
+            self._apply_keep_state(save=False)
+            return
+
         self.btn_start.config(
             state="disabled" if busy else "normal",
             text="⏳ Обработка..." if busy else "▶  НАЧАТЬ ОБРАБОТКУ",
         )
         self.btn_cancel.config(state="normal" if busy else "disabled")
+        if hasattr(self, "_refresh_model_button_state"):
+            self._refresh_model_button_state()
         for widget in (
             self.btn_add,
             self.btn_remove,
             self.btn_clear,
+            getattr(self, "btn_output_dir", None),
             self.chk_keep,
             self.chk_review,
             self.scale_vol,
@@ -60,7 +106,7 @@ class UIControlsMixin:
 
     def _apply_keep_state(self, save: bool = False):
         keep_original = bool(self.var_keep.get())
-        if self._processing:
+        if self._processing and not hasattr(self, "_task_queue_state"):
             self.scale_vol.state(["disabled"])
             self.lbl_vol.config(state="disabled")
         else:
@@ -98,39 +144,43 @@ class UIControlsMixin:
             "noise_reduction": bool(self.var_denoise.get()),
             "master_loudness_i": int(float(self.var_loudness.get())),
             "speech_speed_limit": float(self.combo_speed.get() or TOTAL_MAX_SPEECH_SPEED),
+            "hybrid_local_first": bool(self.var_hybrid_local_first.get()) if hasattr(self, "var_hybrid_local_first") else True,
+            "auto_install_argos_pairs": bool(self.var_auto_install_argos.get()) if hasattr(self, "var_auto_install_argos") else True,
+            "local_piper_fallback": bool(self.var_local_piper_fallback.get()) if hasattr(self, "var_local_piper_fallback") else True,
+            "preferred_piper_voice": self._preferred_piper_voice_id() if hasattr(self, "_preferred_piper_voice_id") else "piper-dmitri-ru",
         })
 
 
     def _on_vol_changed(self, value):
         volume = int(float(value))
         self.lbl_vol.config(text=f"Громкость оригинала: {volume}%")
-        self.save_settings()
+        self._schedule_settings_save()
 
 
     def _on_voice_volume_changed(self, value):
         volume = int(float(value))
         self.lbl_voice_vol.config(text=f"Громкость новой озвучки: {volume}%")
-        self.save_settings()
+        self._schedule_settings_save()
 
 
     def _on_highpass_changed(self, value):
         hz = int(float(value))
         label = "выкл" if hz <= 0 else f"{hz} Гц"
         self.lbl_highpass.config(text=f"Убрать гул ниже: {label}")
-        self.save_settings()
+        self._schedule_settings_save()
 
 
     def _on_lowpass_changed(self, value):
         hz = int(float(value))
         label = "выкл" if hz < 2500 else f"{hz} Гц"
         self.lbl_lowpass.config(text=f"Смягчить верх: {label}")
-        self.save_settings()
+        self._schedule_settings_save()
 
 
     def _on_loudness_changed(self, value):
         loudness = int(float(value))
         self.lbl_loudness.config(text=f"Итоговая громкость: {loudness} LUFS")
-        self.save_settings()
+        self._schedule_settings_save()
 
 
     def _clear_log(self):

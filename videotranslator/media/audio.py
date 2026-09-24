@@ -97,6 +97,38 @@ def ffmpeg_has_filter(ffmpeg: str, filter_name: str, log=None) -> bool:
     return ok
 
 
+def build_original_voice_mix_tail(original_label: str, voice_label: str, *,
+                                  output_label: str = "[aout]", duck_original: bool = False,
+                                  label_prefix: str = "vtduck") -> str:
+    """Build the final original+voice mix, optionally ducking background under speech.
+
+    ``sidechaincompress`` processes the original (main input) from the translated
+    voice (sidechain).  The voice is split because one filter output pad cannot be
+    consumed twice.  The non-ducking branch intentionally mirrors the historical
+    ``amix`` graph for compatibility with minimal FFmpeg builds.
+    """
+    if not duck_original:
+        return (
+            f"{original_label}{voice_label}"
+            "amix=inputs=2:duration=longest:dropout_transition=0:normalize=0,"
+            f"alimiter=limit=0.95{output_label}"
+        )
+
+    prefix = re.sub(r"[^A-Za-z0-9_]", "_", str(label_prefix or "vtduck"))
+    sidechain = f"[{prefix}_sc]"
+    voice_mix = f"[{prefix}_voice]"
+    ducked = f"[{prefix}_orig]"
+    return (
+        f"{voice_label}asplit=2{sidechain}{voice_mix};"
+        f"{original_label}{sidechain}"
+        "sidechaincompress=threshold=0.035:ratio=6:attack=12:release=250:knee=4:detection=rms"
+        f"{ducked};"
+        f"{ducked}{voice_mix}"
+        "amix=inputs=2:duration=longest:dropout_transition=0:normalize=0,"
+        f"alimiter=limit=0.95{output_label}"
+    )
+
+
 def ffmpeg_has_encoder(ffmpeg: str, encoder_name: str, log=None) -> bool:
     """Проверяет, есть ли в сборке ffmpeg нужный видеокодер."""
     cache = getattr(ffmpeg_has_encoder, "_cache", {})

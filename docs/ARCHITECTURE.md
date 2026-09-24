@@ -9,7 +9,7 @@ The architecture is optimized for **owner locality**, not maximum file count.
 
 ## Primary feature boundaries
 
-UI: `ui/batch_recovery.py`, `batch_start.py`, `batch_worker.py`, `review_flow.py`, `review_window.py`, layout/controls/settings.
+UI: `ui/tasks.py` owns the persistent Tasks tab/FIFO dispatcher; `batch_start.py` snapshots and launches jobs; `batch_worker.py` processes one active batch. `batch_recovery.py`, `review_flow.py`, `review_window.py`, layout/controls/settings keep their focused UI roles.
 
 One-video pipeline: `pipeline/process.py` is the state machine; inspect only the needed `VT*` phase. Translation, TTS, Pause Sync and mixing each have separate owners.
 
@@ -17,7 +17,7 @@ Media: `media/process.py` owns subprocess lifecycle; `probe.py` owns probe/extra
 
 Diagnostics: logger lifecycle, analysis, report rendering and summary updates are separate owners.
 
-Recovery: `recovery/batch.py` and `recovery/translation.py` own persisted state.
+Recovery: `recovery/tasks.py` owns the durable multi-task FIFO queue, `recovery/batch.py` owns one task's per-file batch state, and `recovery/translation.py` owns per-segment translation checkpoints.
 
 ## Facades
 

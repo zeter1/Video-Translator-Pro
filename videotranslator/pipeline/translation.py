@@ -405,7 +405,7 @@ class TranslationMixin:
             return results, []
         local_requested = bool(settings.get("local_first", True)) and source and source != target
         if not local_requested:
-            return self._translate_google_records_batch(records, attempts=attempts, segment_func=self._translate_google_segment)
+            return self._translate_google_records_batch(records, attempts=attempts, segment_func=self.translate_segment)
 
         manager = self._get_local_translation_manager()
         route_hint = getattr(self, "_local_translation_route_available", None)
@@ -413,7 +413,7 @@ class TranslationMixin:
             route_hint = manager.has_local_route(source, target)
         local_enabled = bool(route_hint)
         if not local_enabled:
-            return self._translate_google_records_batch(records, attempts=attempts, segment_func=self._translate_google_segment)
+            return self._translate_google_records_batch(records, attempts=attempts, segment_func=self.translate_segment)
 
         results: dict[int, str] = {}
         repair_records: list[tuple[int, dict]] = []

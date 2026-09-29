@@ -27,12 +27,28 @@ def make_unique_output_path(folder: str, base_name: str, suffix: str = "_TR", ex
         idx += 1
 
 
+def _unique_auxiliary_path(output_path: str, suffix: str) -> Path:
+    folder = get_translated_texts_dir()
+    base_name = safe_log_filename(Path(output_path).stem or "translation")
+    path = folder / f"{base_name}{suffix}"
+    if not path.exists():
+        return path
+
+    suffix_root, suffix_ext = os.path.splitext(suffix)
+    index = 2
+    while True:
+        candidate = folder / f"{base_name}{suffix_root}_{index}{suffix_ext}"
+        if not candidate.exists():
+            return candidate
+        index += 1
+
+
 def write_translation_report(output_path: str, segments: list, pause_plan: list,
                              original_dur: float, final_dur: float, log=None,
                              source_lang: str = "auto", target_info: dict | None = None) -> str:
-    """Пишет рядом с MP4 проверочный отчёт: весь распознанный текст и выбранный перевод."""
-    report_path = os.path.splitext(output_path)[0] + "_segments.txt"
+    """Write the detailed report to internal translated_texts, never beside the final video."""
     try:
+        report_path = _unique_auxiliary_path(output_path, "_segments.txt")
         target_info = dict(target_info or get_target_language(DEFAULT_TARGET_LANGUAGE))
         target_code = str(target_info.get("code") or "?")
         target_name = str(target_info.get("name") or target_code)
@@ -67,7 +83,7 @@ def write_translation_report(output_path: str, segments: list, pause_plan: list,
             lines.append(f"SRC ({source_label}): " + (seg.get("source") or "").strip())
             lines.append(f"{target_code.upper()}: " + (seg.get("translated") or "").strip())
             lines.append("")
-        atomic_write_text(Path(report_path), "\n".join(lines))
+        atomic_write_text(report_path, "\n".join(lines))
         if log:
             log(f"   📝 Отчёт сегментов → {report_path}")
         return report_path
@@ -170,11 +186,10 @@ def _render_srt(segments: list, text_key: str, pause_plan: list | None) -> str:
 
 def write_subtitle_files(output_path: str, segments: list, pause_plan: list | None = None,
                          source_lang: str = "auto", target_info: dict | None = None, log=None) -> dict:
-    """Write source and translated SRT sidecars aligned to the final Pause Sync timeline."""
+    """Write source/translated SRT files to internal translated_texts storage."""
     paths = {}
     try:
         target_info = dict(target_info or get_target_language(DEFAULT_TARGET_LANGUAGE))
-        stem = Path(output_path).with_suffix("")
 
         def safe_code(value: str, fallback: str) -> str:
             cleaned = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in str(value or ""))
@@ -182,8 +197,8 @@ def write_subtitle_files(output_path: str, segments: list, pause_plan: list | No
 
         source_code = safe_code(source_lang, "auto")
         target_code = safe_code(target_info.get("code"), "target")
-        source_path = Path(f"{stem}_source_{source_code}.srt")
-        translated_path = Path(f"{stem}_translated_{target_code}.srt")
+        source_path = _unique_auxiliary_path(output_path, f"_source_{source_code}.srt")
+        translated_path = _unique_auxiliary_path(output_path, f"_translated_{target_code}.srt")
 
         source_srt = _render_srt(segments, "source", pause_plan)
         translated_srt = _render_srt(segments, "translated", pause_plan)

@@ -300,9 +300,15 @@ class UIBatchWorkerMixin:
                         review_before_tts=review,
                         audio_settings=audio_settings,
                     )
+                    effective_output_path = str(getattr(translator, "completed_output_path", "") or output_path)
                     if file_ok:
                         successful += 1
-                        entry.update({"status": "succeeded", "last_error": ""})
+                        output_path = effective_output_path
+                        entry.update({
+                            "status": "succeeded",
+                            "output_path": os.path.abspath(output_path),
+                            "last_error": "",
+                        })
                     else:
                         self._log(f"⚠️ Файл не обработан: {file_path}")
                         entry.update({

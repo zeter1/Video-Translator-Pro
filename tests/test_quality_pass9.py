@@ -8,6 +8,7 @@ import struct
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 import wave
 
 from videotranslator.media.audio import build_original_voice_mix_tail
@@ -131,11 +132,16 @@ class SubtitleSidecarTests(unittest.TestCase):
     def test_writes_distinct_source_and_translated_sidecars(self):
         segments = [{"start": 0.2, "end": 1.2, "source": "Hello", "translated": "Привет"}]
         with tempfile.TemporaryDirectory() as directory:
+            runtime_dir = Path(directory) / "translated_texts"
+            runtime_dir.mkdir()
             video = Path(directory) / "movie_TR.mp4"
-            paths = write_subtitle_files(
-                str(video), segments, [], source_lang="en", target_info={"code": "ru", "name": "Русский"}
-            )
+            with mock.patch("videotranslator.reports.output.get_translated_texts_dir", return_value=runtime_dir):
+                paths = write_subtitle_files(
+                    str(video), segments, [], source_lang="en", target_info={"code": "ru", "name": "Русский"}
+                )
             self.assertEqual(set(paths), {"source", "translated"})
+            self.assertEqual(Path(paths["source"]).parent, runtime_dir)
+            self.assertEqual(Path(paths["translated"]).parent, runtime_dir)
             self.assertTrue(Path(paths["source"]).exists())
             self.assertTrue(Path(paths["translated"]).exists())
             self.assertIn("Hello", Path(paths["source"]).read_text(encoding="utf-8"))

@@ -246,9 +246,33 @@ class TranslationMixin:
         local_first = bool(settings.get("local_first", True)) and source and source != target
         local_candidate = ""
         local_engine = ""
+        manager = None
 
         if local_first:
-            manager = self._get_local_translation_manager()
+            route_hint = getattr(self, "_local_translation_route_available", None)
+            if route_hint is False:
+                local_first = False
+            else:
+                try:
+                    manager = self._get_local_translation_manager()
+                    if route_hint is None:
+                        route_hint = bool(manager.has_local_route(source, target))
+                    local_first = bool(route_hint)
+                except Exception as exc:
+                    local_first = False
+                    warning_key = (source, target)
+                    if getattr(self, "_local_route_check_warning_key", None) != warning_key:
+                        self._local_route_check_warning_key = warning_key
+                        self._problem(
+                            "local_translation_route_check_failed",
+                            level="warning",
+                            message="Не удалось проверить локальный маршрут; используется online fallback.",
+                            source_language=source,
+                            target_language=target,
+                            exception={"type": type(exc).__name__, "message": compact_exception(exc, max_len=800)},
+                        )
+
+        if local_first and manager is not None:
             try:
                 local = manager.translate(text, source, target)
                 local_candidate, local_engine = local.text.strip(), local.engine
@@ -379,10 +403,17 @@ class TranslationMixin:
                 record["translated"] = value
                 results[index] = value
             return results, []
+        local_requested = bool(settings.get("local_first", True)) and source and source != target
+        if not local_requested:
+            return self._translate_google_records_batch(records, attempts=attempts, segment_func=self._translate_google_segment)
+
         manager = self._get_local_translation_manager()
-        local_enabled = bool(settings.get("local_first", True)) and source and source != target and manager.has_local_route(source, target)
+        route_hint = getattr(self, "_local_translation_route_available", None)
+        if route_hint is None:
+            route_hint = manager.has_local_route(source, target)
+        local_enabled = bool(route_hint)
         if not local_enabled:
-            return self._translate_google_records_batch(records, attempts=attempts, segment_func=self.translate_segment)
+            return self._translate_google_records_batch(records, attempts=attempts, segment_func=self._translate_google_segment)
 
         results: dict[int, str] = {}
         repair_records: list[tuple[int, dict]] = []

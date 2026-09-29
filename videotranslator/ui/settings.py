@@ -298,7 +298,9 @@ class UISettingsMixin:
             # cancellation state before GUI-owned loggers disappear. A daemon worker
             # is retained only as last-resort process-exit protection for blocking
             # third-party/network calls that Python cannot safely interrupt.
-            self._close_deadline_monotonic = time.monotonic() + 5.0
+            # Whisper is processed in bounded chunks; allow the current chunk to
+            # finish and observe cancellation instead of tearing down Tk/loggers below it.
+            self._close_deadline_monotonic = time.monotonic() + 30.0
             self._wait_for_worker_before_close()
             return
 

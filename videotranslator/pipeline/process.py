@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from videotranslator.core.compat_bridge import call_legacy_override
 
+import errno
 import hashlib
 import os
+from pathlib import Path
 import shutil
 import tempfile
 import time
@@ -23,7 +25,7 @@ from videotranslator.media.process import find_ffmpeg as _legacy_find_ffmpeg, fi
 from videotranslator.media.video import assemble_final_video as _legacy_assemble_final_video, extract_audio_for_whisper as _legacy_extract_audio_for_whisper, get_media_duration as _legacy_get_media_duration
 from videotranslator.recovery.translation import load_translation_checkpoint, translation_checkpoint_path as _legacy_translation_checkpoint_path, translation_segment_key
 from videotranslator.reports.output import write_subtitle_files as _legacy_write_subtitle_files, write_translated_text_file as _legacy_write_translated_text_file, write_translation_report as _legacy_write_translation_report
-from videotranslator.speech.whisper import get_whisper_model as _legacy_get_whisper_model, is_cuda_available, summarize_transcription_quality, transcribe_video
+from videotranslator.speech.whisper import get_whisper_model as _legacy_get_whisper_model, is_cuda_available, looks_like_russian_text, summarize_transcription_quality, transcribe_video
 from videotranslator.sync.pause import merge_short_segments
 from videotranslator.translation.batching import split_translation_batches
 from videotranslator.translation.glossary import Glossary
@@ -60,6 +62,102 @@ def write_translation_report(*args, **kwargs):
 def write_subtitle_files(*args, **kwargs):
     return call_legacy_override('write_subtitle_files', _legacy_write_subtitle_files, *args, **kwargs)
 
+
+def _passthrough_output_path(input_path: str, requested_output_path: str) -> str:
+    """Preserve the source container when a Russian video needs no translation."""
+    source_suffix = Path(input_path).suffix
+    requested = Path(requested_output_path)
+    candidate = requested if not source_suffix or source_suffix.lower() == requested.suffix.lower() else requested.with_suffix(source_suffix)
+    if not candidate.exists():
+        return str(candidate)
+
+    index = 2
+    while True:
+        numbered = candidate.with_name(f"{candidate.stem}_{index}{candidate.suffix}")
+        if not numbered.exists():
+            return str(numbered)
+        index += 1
+
+
+def _move_source_video(input_path: str, output_path: str, cancel_event=None) -> str:
+    """Move without overwrite; a cross-volume copy remains cancellable and fail-safe."""
+    source = Path(input_path)
+    destination = Path(output_path)
+    if cancel_event is not None and cancel_event.is_set():
+        raise CancelledError()
+    if destination.exists():
+        raise FileExistsError(f"Файл результата уже существует: {destination}")
+
+    source_size = source.stat().st_size
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.rename(source, destination)
+    except OSError as exc:
+        cross_device = exc.errno == errno.EXDEV or getattr(exc, "winerror", None) == 17
+        if not cross_device:
+            raise
+
+        fd, partial_name = tempfile.mkstemp(
+            prefix=f".{destination.stem}.vt-moving-",
+            suffix=".partial",
+            dir=str(destination.parent),
+        )
+        os.close(fd)
+        partial = Path(partial_name)
+        try:
+            with source.open("rb") as src, partial.open("wb") as dst:
+                while True:
+                    if cancel_event is not None and cancel_event.is_set():
+                        raise CancelledError()
+                    block = src.read(8 * 1024 * 1024)
+                    if not block:
+                        break
+                    dst.write(block)
+                dst.flush()
+                os.fsync(dst.fileno())
+
+            if partial.stat().st_size != source_size:
+                raise OSError("Размер временной копии видео не совпадает с исходником.")
+            if cancel_event is not None and cancel_event.is_set():
+                raise CancelledError()
+            if destination.exists():
+                raise FileExistsError(f"Файл результата уже существует: {destination}")
+            try:
+                os.link(partial, destination)
+                partial.unlink()
+            except OSError:
+                if destination.exists():
+                    raise FileExistsError(f"Файл результата уже существует: {destination}")
+                os.rename(partial, destination)
+
+            try:
+                source.unlink()
+            except Exception:
+                try:
+                    destination.unlink()
+                except Exception:
+                    pass
+                raise
+        finally:
+            try:
+                partial.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+    try:
+        moved_size = destination.stat().st_size
+    except OSError:
+        moved_size = -1
+    if moved_size != source_size:
+        try:
+            if not source.exists() and destination.exists():
+                os.rename(destination, source)
+        except Exception:
+            pass
+        raise OSError("Перемещённое видео не прошло проверку размера.")
+    return str(destination)
+
+
 class ProcessMixin:
     """Focused behavior-preserving mixin extracted for AI-local navigation."""
 
@@ -75,6 +173,9 @@ class ProcessMixin:
         checkpoint_segments = None
         pipeline_succeeded = False
         preserve_temp = False
+
+        self.completed_output_path = ""
+        self._local_translation_route_available = None
 
         try:
             self.target_info = dict(target_info or get_target_language(DEFAULT_TARGET_LANGUAGE))
@@ -285,6 +386,7 @@ class ProcessMixin:
             self._check_cancel()
 
             self.set_progress(18, "Распознавание речи...")
+            target_code = str(self.target_info.get("code") or "ru").lower().split("-")[0]
             with ActivityHeartbeat(
                 self.log,
                 "Распознавание речи",
@@ -297,6 +399,8 @@ class ProcessMixin:
                     tmp_wav,
                     use_cuda=use_cuda,
                     initial_prompt=glossary_prompt,
+                    cancel_event=self.cancel,
+                    stop_after_detected_languages={"ru"} if target_code == "ru" else None,
                 )
             self._check_cancel()
 
@@ -324,6 +428,9 @@ class ProcessMixin:
                 carry_initial_prompt=bool(whisper_features.get("carry_initial_prompt")),
                 glossary_entries=len(glossary.items),
                 compat_disabled=list(whisper_features.get("compat_disabled") or ()),
+                cancellable_chunks=bool(whisper_features.get("cancellable_chunks")),
+                chunks_processed=int(whisper_features.get("chunks_processed") or 0),
+                early_language_stop=bool(whisper_features.get("early_language_stop")),
                 **asr_quality,
             )
             full_text = (result.get("text") or "").strip()
@@ -334,7 +441,48 @@ class ProcessMixin:
                 raise RuntimeError("Whisper не смог распознать речь.")
 
             self.log(f"   🌐 Язык: {lang} | Сегментов: {len(segs_raw)}")
-            target_code = str(self.target_info.get("code") or "ru").lower().split("-")[0]
+            if (
+                self.source_language == "ru"
+                and target_code == "ru"
+                and looks_like_russian_text(full_text)
+            ):
+                self._problem(
+                    "stage_finished",
+                    message="Русская речь подтверждена; полный ASR и перевод не требуются.",
+                    stage_number=2,
+                    elapsed_sec=round(time.monotonic() - stage_started_at, 3),
+                    detected_language=lang,
+                    raw_segments=len(segs_raw),
+                    merged_segments=len(segs_raw),
+                    text_length=len(full_text),
+                    early_language_stop=bool(whisper_features.get("early_language_stop")),
+                )
+                self.current_stage = "russian_source_move"
+                self.set_progress(95, "Русская речь — перемещение без перевода...")
+                passthrough_path = _passthrough_output_path(input_path, output_path)
+                moved_path = _move_source_video(input_path, passthrough_path, cancel_event=self.cancel)
+                self.completed_output_path = moved_path
+                self._problem(
+                    "russian_source_moved_without_translation",
+                    message="Исходное видео уже на русском и перемещено в папку результатов без перевода/озвучки.",
+                    detected_language=lang,
+                    target_language=target_code,
+                    final_path=os.path.abspath(moved_path),
+                    source_removed=True,
+                )
+                self.set_progress(100, "Готово: видео уже на русском")
+                self.log(f"\n✅ УЖЕ НА РУССКОМ → {moved_path}")
+                self.current_stage = "finished"
+                self._problem(
+                    "file_pipeline_finished",
+                    message="Видео уже содержало русскую речь; исходник перемещён без перевода.",
+                    elapsed_sec=round(time.monotonic() - process_started_at, 3),
+                    final_path=os.path.abspath(moved_path),
+                    bypass_reason="source_language_is_russian",
+                )
+                pipeline_succeeded = True
+                return True
+
             if self.hybrid_translation_settings.get("local_first") and self.source_language and self.source_language != target_code:
                 try:
                     manager = self._get_local_translation_manager()
@@ -349,6 +497,7 @@ class ProcessMixin:
                             target_code,
                             progress_cb=lambda message: self.log(f"      {message}"),
                         )
+                    self._local_translation_route_available = bool(has_route)
                     if has_route:
                         self.log(
                             "   🧠 Hybrid AI: основной перевод локальный; Google будет вызван только "
@@ -364,6 +513,7 @@ class ProcessMixin:
                     else:
                         self.log("   ⚠️ Локального маршрута нет; для этого видео используется Google Translate.")
                 except Exception as exc:
+                    self._local_translation_route_available = False
                     self.log(f"   ⚠️ Подготовка локального перевода не удалась: {compact_exception(exc)}")
                     self._problem(
                         "local_translation_setup_failed",
@@ -905,6 +1055,7 @@ class ProcessMixin:
             )
 
 # CODEX-PHASE VT7 REPORTS — translated text + segment/pause diagnostics
+            self.completed_output_path = final_path
             write_translation_report(
                 final_path,
                 translated,

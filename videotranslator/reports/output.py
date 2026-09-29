@@ -86,7 +86,7 @@ def write_translation_report(output_path: str, segments: list, pause_plan: list,
         atomic_write_text(report_path, "\n".join(lines))
         if log:
             log(f"   📝 Отчёт сегментов → {report_path}")
-        return report_path
+        return str(report_path)
     except Exception as exc:
         if log:
             log(f"      ⚠️ Не удалось сохранить отчёт сегментов: {exc}")

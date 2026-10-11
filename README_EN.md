@@ -6,6 +6,20 @@
 
 A key feature is **Pause Sync**: when translated speech is longer than the original phrase, the application prioritizes natural speech instead of aggressively speeding it up or cutting it off.
 
+## Download and run on Windows
+
+> Windows builds are marked **Prerelease**: they are preliminary builds for testing. A release build may differ from the current source.
+
+1. Open [GitHub Releases](https://github.com/zeter1/Video-Translator-Pro/releases) and expand **Assets** for the build you choose.
+2. Download and run `Video-Translator-Pro.exe`.
+3. Select a video, source/target languages, and speech settings, then start translation.
+
+Python, FFmpeg, and ffprobe are included. **Whisper models, local translators, and voices are installed separately**; the first model download requires internet access. Local translators and voices are configured in the “Translators and voices” tab. Online translation and Edge TTS/gTTS require a network connection; fully local processing depends on the installed components you select.
+
+A SHA-256 file is published beside the EXE. Regression and packaged self-tests do not establish translation quality or synchronization for a specific video.
+
+> The EXE is not commercially code-signed; Windows SmartScreen may warn about a new or rarely downloaded file.
+
 ## What this project demonstrates
 
 - a multi-stage pipeline: audio extraction → speech recognition → translation → TTS → video assembly;
@@ -30,7 +44,7 @@ A key feature is **Pause Sync**: when translated speech is longer than the origi
 - final MP4 validation;
 - structured diagnostics.
 
-## Installation
+## Installation from source
 
 1. Install Python 3.10–3.13 for Windows.
 2. Install FFmpeg and FFprobe and add them to `PATH`, or place the executables next to `video_translator.py`.
@@ -52,7 +66,7 @@ py -m pip install -r requirements.txt
 
 Whisper may download the selected model on first use.
 
-## Running
+## Running from source
 
 ```powershell
 py video_translator.py

@@ -440,7 +440,7 @@ class UITasksMixin:
                 text = f"Задача успешно завершена: {successful}/{total}.\nРезультаты: {output_dir}"
                 if is_current:
                     self.lbl_tasks_status.config(text="Задача завершена — проверяю следующую в очереди")
-                show_topmost_notification(self.root, title, text)
+                show_topmost_notification(self.root, title, text, output_dir=output_dir)
             elif cancelled:
                 if is_current:
                     self.lbl_tasks_status.config(text="Текущая задача отменена")
@@ -451,6 +451,7 @@ class UITasksMixin:
                     self.root,
                     "Перевод завершён с ошибками",
                     f"Успешно обработано: {successful}/{total}.\nНезавершённую задачу можно повторить на вкладке «Задачи».",
+                    output_dir=output_dir if successful else "",
                 )
             if is_current:
                 self._schedule_task_dispatch(150)

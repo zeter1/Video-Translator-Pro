@@ -11,6 +11,8 @@ The architecture is optimized for **owner locality**, not maximum file count.
 
 UI: `ui/tasks.py` owns the persistent Tasks tab/FIFO dispatcher; `batch_start.py` snapshots and launches jobs; `batch_worker.py` processes one active batch. `batch_recovery.py`, `review_flow.py`, `review_window.py`, layout/controls/settings keep their focused UI roles.
 
+`ui/notifications.py` owns persistent completion cards in one nonmodal, topmost Tk window at the primary desktop's bottom-right work area (above the taskbar). The task finalizer passes its own output folder on the GUI thread. Each card remains until its cross is clicked; opening Explorer does not dismiss it. Cards accumulate with scrolling, have no timeout or worker thread, and are destroyed with the app root.
+
 One-video pipeline: `pipeline/process.py` is the state machine; inspect only the needed `VT*` phase. Translation, TTS, Pause Sync and mixing each have separate owners.
 
 Media: `media/process.py` owns subprocess lifecycle; `probe.py` owns probe/extract/validation; `final_video.py` owns MP4/NVENC/fallback.

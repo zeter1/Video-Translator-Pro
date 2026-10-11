@@ -50,18 +50,18 @@
 | `FM2 AUDIO_GRAPH` | `videotranslator/media/final_video.py:465–483` |
 | `FM3 FAST_COPY` | `videotranslator/media/final_video.py:484–563` |
 | `FM4 REENCODE_FALLBACK` | `videotranslator/media/final_video.py:564–672` |
-| `VT1 AUDIO_EXTRACT` | `videotranslator/pipeline/process.py:227–262` |
-| `VT2 WHISPER` | `videotranslator/pipeline/process.py:263–393` |
-| `VT3 TRANSLATION` | `videotranslator/pipeline/process.py:394–407` |
-| `VT3A CHECKPOINT_PLAN` | `videotranslator/pipeline/process.py:408–497` |
-| `VT3B BATCH_TRANSLATE` | `videotranslator/pipeline/process.py:498–605` |
-| `VT3C DEFERRED_RETRY` | `videotranslator/pipeline/process.py:606–708` |
-| `VT3D TRANSLATION_INTEGRITY` | `videotranslator/pipeline/process.py:709–774` |
-| `VT4 MANUAL_REVIEW` | `videotranslator/pipeline/process.py:775–861` |
-| `VT5 TTS_TIMELINE` | `videotranslator/pipeline/process.py:862–880` |
-| `VT6 FINAL_MUX` | `videotranslator/pipeline/process.py:881–906` |
-| `VT7 REPORTS` | `videotranslator/pipeline/process.py:907–1026` |
-| `VT8 CLEANUP` | `videotranslator/pipeline/process.py:1027–1060` |
+| `VT1 AUDIO_EXTRACT` | `videotranslator/pipeline/process.py:328–363` |
+| `VT2 WHISPER` | `videotranslator/pipeline/process.py:364–543` |
+| `VT3 TRANSLATION` | `videotranslator/pipeline/process.py:544–557` |
+| `VT3A CHECKPOINT_PLAN` | `videotranslator/pipeline/process.py:558–647` |
+| `VT3B BATCH_TRANSLATE` | `videotranslator/pipeline/process.py:648–755` |
+| `VT3C DEFERRED_RETRY` | `videotranslator/pipeline/process.py:756–858` |
+| `VT3D TRANSLATION_INTEGRITY` | `videotranslator/pipeline/process.py:859–924` |
+| `VT4 MANUAL_REVIEW` | `videotranslator/pipeline/process.py:925–1011` |
+| `VT5 TTS_TIMELINE` | `videotranslator/pipeline/process.py:1012–1030` |
+| `VT6 FINAL_MUX` | `videotranslator/pipeline/process.py:1031–1056` |
+| `VT7 REPORTS` | `videotranslator/pipeline/process.py:1057–1177` |
+| `VT8 CLEANUP` | `videotranslator/pipeline/process.py:1178–1211` |
 | `TL1 PLAN_JOBS` | `videotranslator/pipeline/timeline_build.py:67–91` |
 | `TL2 PARALLEL_TTS` | `videotranslator/pipeline/timeline_build.py:92–130` |
 | `TL3 RECOVERY` | `videotranslator/pipeline/timeline_build.py:131–131` |
@@ -79,7 +79,7 @@
 | `TG5 EXHAUSTED` | `videotranslator/pipeline/tts_generate.py:396–419` |
 | `BW1 BATCH_INIT` | `videotranslator/ui/batch_worker.py:39–129` |
 | `BW2 FILE_LOOP` | `videotranslator/ui/batch_worker.py:130–279` |
-| `BW3 RUN_VIDEO` | `videotranslator/ui/batch_worker.py:280–372` |
-| `BW4 FINALIZE_BATCH` | `videotranslator/ui/batch_worker.py:373–479` |
+| `BW3 RUN_VIDEO` | `videotranslator/ui/batch_worker.py:280–378` |
+| `BW4 FINALIZE_BATCH` | `videotranslator/ui/batch_worker.py:379–485` |
 
 Detailed symbols, callers, state reads/writes and test metadata live only in the machine index.

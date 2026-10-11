@@ -280,6 +280,7 @@ class QueueGenerationGuardPass11Tests(unittest.TestCase):
         self.assertEqual([False], harness.busy_changes)
         self.assertEqual([150], harness.dispatches)
         notify.assert_called_once()
+        self.assertEqual(completed_batch["output_dir"], notify.call_args.kwargs.get("output_dir"))
 
     def test_late_completion_cannot_release_newer_active_task(self):
         harness = self.Harness()

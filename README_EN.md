@@ -42,7 +42,8 @@ A SHA-256 file is published beside the EXE. Regression and packaged self-tests d
 - persistent TTS cache;
 - checkpoint/recovery;
 - final MP4 validation;
-- structured diagnostics.
+- structured diagnostics;
+- persistent translation-completion notifications with an Open Folder button, individually dismissible messages and a scrollable list.
 
 ## Installation from source
 

@@ -151,3 +151,19 @@ GitHub Actions runs compilation and the offline regression suite. Full end-to-en
 ## License
 
 The project is published for portfolio review, architecture study, and source-code inspection. No separate open-source license is currently granted.
+
+## Developer contacts
+
+**Язык / Language:** [Русский](README.md#контакты-для-связи-с-разработчиком) · **English**
+
+- [zeter11@gmail.com](mailto:zeter11@gmail.com)
+- [https://t.me/zeter1](https://t.me/zeter1)
+- [https://www.linkedin.com/in/zeter/](https://www.linkedin.com/in/zeter/)
+- [https://www.facebook.com/zeter1](https://www.facebook.com/zeter1)
+- [https://vk.ru/zeter1](https://vk.ru/zeter1)
+- [https://www.instagram.com/zeter1992/](https://www.instagram.com/zeter1992/)
+- [https://tenchat.ru/zeter](https://tenchat.ru/zeter)
+- [https://x.com/zeter1](https://x.com/zeter1)
+- [https://www.threads.com/@zeter1992](https://www.threads.com/@zeter1992)
+- [https://ok.ru/zeter1](https://ok.ru/zeter1)
+- [https://t.me/zeterchat](https://t.me/zeterchat) — Telegram group: about me, projects and chat

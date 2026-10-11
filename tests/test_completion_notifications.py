@@ -56,7 +56,10 @@ class CompletionNotificationTests(unittest.TestCase):
             card = notice.cards[0][0]
             with mock.patch.object(os, "startfile") as startfile:
                 self.button(card, "Открыть папку").invoke()
-            startfile.assert_called_once_with(str(folder.resolve()))
+            startfile.assert_called_once()
+            # Windows may use an 8.3 short alias (RUNNER~1) for this folder.
+            # Check the actual directory identity, not the string spelling.
+            self.assertTrue(os.path.samefile(startfile.call_args.args[0], folder))
             self.assertTrue(notice.window.winfo_exists())
             self.button(card, "×").invoke()
             self.assertFalse(notice.window.winfo_exists())

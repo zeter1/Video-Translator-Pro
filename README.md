@@ -147,3 +147,9 @@ GitHub Actions выполняет compile и offline regression suite. Полн�
 ## Лицензия
 
 Проект опубликован для портфолио, изучения архитектуры и просмотра исходного кода. Отдельная open-source лицензия в настоящее время не предоставляется.
+
+## Контакты для связи с разработчиком
+
+- [zeter11@gmail.com](mailto:zeter11@gmail.com)
+- [https://t.me/zeter1](https://t.me/zeter1)
+- [https://www.linkedin.com/in/zeter/](https://www.linkedin.com/in/zeter/)

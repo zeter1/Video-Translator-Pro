@@ -16,6 +16,12 @@ python tools/verify_project.py
 
 Checks compile, legacy API/program directory, recovery startup guard, CODE_MAP v3 canonical ownership, deterministic task routing, hard source budgets, targeted-test routing, context benchmark and the complete discovered regression suite (minimum baseline: 43 tests).
 
+## Whisper FP32 regression
+
+`tests/test_whisper_precision.py` reproduces a model boundary where FP16 produces NaN on CUDA. Four offline regressions check successful CUDA-requested transcription with FP32, merging chunks and shifted segment/word timestamps, prompt cancellation and propagation of unrelated decoder errors. The tests do not load a real model or GPU.
+
+The supplied 2026.10.14.18 archive reports a successful real-world GTX 1660 SUPER transcription of the same short sample with FP32. This does not prove packaged EXE, full GUI or end-to-end video translation. FP32 can consume more VRAM than FP16.
+
 ## Safe execution and synthetic media
 
 Imports do not launch the GUI. Do not call `bootstrap.main()` or instantiate `App` for offline verification: those use real settings and diagnostics. `VideoTranslator` creates a TTS cache in its constructor; offline tests patch `videotranslator.tts.cache.get_tts_cache_dir` to a temporary directory before constructing it. Pipeline tests also mock Whisper, extraction, network requests and checkpoint paths. Changing cwd/TEMP alone does not isolate program-relative state.

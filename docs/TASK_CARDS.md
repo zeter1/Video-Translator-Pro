@@ -10,7 +10,7 @@ This is a human fallback. The tools consume the same cards directly from `tools/
 | `batch_start` | Batch start / validation / output directory | `videotranslator/ui/batch_start.py` | `videotranslator/recovery/batch.py`, `videotranslator/ui/queue.py` | 2 |
 | `batch_worker` | Batch worker / multiple files / progress | `videotranslator/ui/batch_worker.py` | `videotranslator/recovery/batch.py`, `videotranslator/pipeline/translator.py` | 2 |
 | `video_pipeline` | One-video pipeline orchestration | `videotranslator/pipeline/process.py` | `videotranslator/pipeline/translator.py` | 0 |
-| `whisper` | Whisper transcription / GPU | `videotranslator/speech/whisper.py` | `videotranslator/pipeline/process.py` | 0 |
+| `whisper` | Whisper transcription / GPU | `videotranslator/speech/whisper.py` | `videotranslator/pipeline/process.py` | 4 |
 | `local_ai_models` | Local AI models / startup update / persistent voices | `videotranslator/models/manager_v8.py` | `videotranslator/ui/models_tab.py`, `videotranslator/models/catalog.py` | 8 |
 | `translation_checkpoint` | Translation checkpoint / resume / integrity | `videotranslator/recovery/translation.py` | `videotranslator/pipeline/translation.py`, `videotranslator/pipeline/process.py` | 2 |
 | `translation_requests` | Google translation / retries / per-segment translation | `videotranslator/pipeline/translation.py` | `videotranslator/network/guard.py`, `videotranslator/recovery/translation.py` | 2 |

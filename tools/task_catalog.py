@@ -222,7 +222,12 @@ TASK_CARDS = [
         "symbols": ["get_whisper_model", "is_cuda_available"],
         "phases": ["VT2"],
         "phase_routes": {"VT2": ["whisper transcription recognition model gpu cuda"]},
-        "tests": [],
+        "tests": [
+            "WhisperPrecisionRegressionTests.test_cuda_transcription_avoids_nonfinite_half_precision",
+            "WhisperPrecisionRegressionTests.test_cuda_chunks_preserve_timestamps_and_full_text",
+            "WhisperPrecisionRegressionTests.test_cancel_during_cuda_chunk_does_not_start_next_chunk",
+            "WhisperPrecisionRegressionTests.test_unrelated_decoder_failure_is_not_hidden",
+        ],
         "avoid": ["videotranslator/pipeline/tts_", "videotranslator/ui/review_"],
         "default_lines": 90,
     },

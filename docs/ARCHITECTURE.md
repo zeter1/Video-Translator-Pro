@@ -15,6 +15,8 @@ UI: `ui/tasks.py` owns the persistent Tasks tab/FIFO dispatcher; `batch_start.py
 
 One-video pipeline: `pipeline/process.py` is the state machine; inspect only the needed `VT*` phase. Translation, TTS, Pause Sync and mixing each have separate owners.
 
+Speech: `speech/whisper.py` loads the cached model on CUDA when available and always transcribes in FP32, including cancellable chunks. CUDA availability must not re-enable FP16: a real GTX 1660 SUPER run produced non-finite decoder logits in FP16 and succeeded on the same audio in FP32. The `use_cuda` keyword remains for caller compatibility; model placement is owned by `get_whisper_model`. Precision is recorded in the Whisper quality event. See [VERIFICATION.md](VERIFICATION.md) for the regression and live-check boundaries.
+
 Media: `media/process.py` owns subprocess lifecycle; `probe.py` owns probe/extract/validation; `final_video.py` owns MP4/NVENC/fallback.
 
 Diagnostics: logger lifecycle, analysis, report rendering and summary updates are separate owners.

@@ -421,6 +421,8 @@ class ProcessMixin:
             self._problem(
                 "whisper_quality_summary",
                 message="Сводка качества и таймингов Whisper.",
+                precision=whisper_features.get("precision"),
+                fp16=bool(whisper_features.get("fp16")),
                 word_timestamps=bool(whisper_features.get("word_timestamps")),
                 hallucination_silence_threshold_sec=whisper_features.get("hallucination_silence_threshold_sec"),
                 initial_prompt_used=bool(whisper_features.get("initial_prompt_used")),

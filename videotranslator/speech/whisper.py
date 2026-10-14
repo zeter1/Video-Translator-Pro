@@ -73,7 +73,9 @@ def transcribe_video(
     segment/word timestamps are shifted back to the original media timeline.
     """
     options = {
-        "fp16": bool(use_cuda),
+        # CUDA FP16 produced non-finite logits on a GTX 1660 SUPER. FP32 fixes
+        # the same audio without moving the model off CUDA or retrying a file.
+        "fp16": False,
         "verbose": False,
         "language": None,
         "task": "transcribe",
@@ -123,6 +125,8 @@ def transcribe_video(
 
     def features(*, chunked: bool, chunks_processed: int = 1, early_language_stop: bool = False):
         return {
+            "precision": "float32",
+            "fp16": bool(options["fp16"]),
             "word_timestamps": bool(options.get("word_timestamps")),
             "hallucination_silence_threshold_sec": options.get("hallucination_silence_threshold"),
             "initial_prompt_used": bool(options.get("initial_prompt")),
